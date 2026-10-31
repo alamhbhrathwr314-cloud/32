@@ -1,0 +1,24 @@
+{
+  "name": "kira-bot",
+  "version": "1.0.0",
+  "description": "بوت ماسنجر عربي: اقتصاد ومستويات وأدوات",
+  "main": "main.js",
+  "scripts": {
+    "start": "node main.js"
+  },
+  "engines": {
+    "node": ">=22.12"
+  },
+  "dependencies": {
+    "@dongdev/fca-unofficial": "latest",
+    "@miraipr0ject/assets": "latest",
+    "axios": "^1.6.0",
+    "chalk": "^4.1.2",
+    "fs-extra": "^11.2.0",
+    "gradient-string": "^2.0.2",
+    "jpeg-js": "^0.4.4",
+    "pngjs": "^7.0.0",
+    "youtube-search-api": "latest",
+    "ytdl-core": "latest"
+  }
+}

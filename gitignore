@@ -1,0 +1,8 @@
+node_modules/
+appstate.json
+cookies.json
+fca-config.json
+Fca_Database/
+Heba_DB/
+*backup*
+package-lock.json
