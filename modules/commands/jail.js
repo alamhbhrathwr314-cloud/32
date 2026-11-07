@@ -21,12 +21,8 @@ const LINES = [
     '🍞 وجبته اليوم: خبز وماء'
 ];
 
-async function fetchAvatar(url) {
-    if (!url) return null;
-    try {
-        const res = await axios.get(url, { responseType: 'arraybuffer', timeout: 8000, maxContentLength: 5 * 1024 * 1024 });
-        return Buffer.from(res.data);
-    } catch (e) { return null; }
+async function fetchAvatar(url, uid) {
+    try { return await require('../../utils/avatar').fetchAvatar(url, uid); } catch (e) { return null; }
 }
 
 module.exports.run = async ({ api, event, args, helpers, deco }) => {
@@ -46,7 +42,7 @@ module.exports.run = async ({ api, event, args, helpers, deco }) => {
     const mentions = [{ tag: `@${name}`, id: target }];
 
     let out = null;
-    try { out = require('../../utils/jailImage').makeJailImage(await fetchAvatar(u.thumbSrc || u.avatar || u.profilePicture), target); }
+    try { out = require('../../utils/jailImage').makeJailImage(await fetchAvatar(u.thumbSrc || u.avatar || u.profilePicture, target), target); }
     catch (e) { out = null; }
     if (!out) return reply(body); // تعذّر رسم الصورة: نرسل النص فقط
 

@@ -27,6 +27,9 @@ const users = require('./utils/db/users');
 const helpers = require('./utils/helpers');
 const power = require('./utils/power');
 const { parseCookies } = require('./utils/cookies');
+const session = require('./utils/session'); // حفظ الكوكيز المحدّثة (يرفعها cloudSync إلى GitHub)
+const autoLeave = require('./utils/autoLeave'); // مغادرة مجموعات «طلبات المراسلة» تلقائيًا
+const panel = require('./utils/panel'); // لوحة التحكم الويب (لا تعمل إلا مع PANEL_PASSWORD)
 
 process.on('unhandledRejection', e => log(String(e && e.stack || e), 'error'));
 process.on('uncaughtException', e => log(String(e && e.stack || e), 'error'));
@@ -101,7 +104,10 @@ async function handleMessage(api, event) {
     // موقوف في هذه المجموعة؟ لا نرد على أحد، إلا أمر ايقاف/تشغيل من المطور ليتمكن من إعادة التشغيل
     if (power.isOff(threadID) && !power.isPowerCommand(body, cfg.getPrefix(), cfg.isAdmin(String(senderID)))) return;
 
+    if (panel.isBanned(senderID) && !cfg.isAdmin(String(senderID))) return; // محظور من لوحة التحكم
+
     recordUser(api, senderID, threadID);
+    panel.noteMessage(threadID);
 
     // خبرة على الرسائل العادية (مرة كل 30 ثانية لكل مستخدم)
     const now = Date.now();
@@ -123,6 +129,7 @@ async function handleMessage(api, event) {
     const { commands, aliases, cooldowns } = global.client;
     const cmd = commands.get(input) || commands.get(aliases.get(input));
     if (!cmd) return;
+    if (panel.isDisabled(cmd.config.name)) return; // عطّلته لوحة التحكم
 
     const isAdmin = cfg.isAdmin(String(senderID));
     if (cmd.config.adminOnly && !isAdmin) {
@@ -141,6 +148,7 @@ async function handleMessage(api, event) {
 
     try {
         log(`${cmd.config.name} ← ${senderID}`, 'CMD');
+        panel.noteCommand(cmd.config.name, threadID, senderID);
         await cmd.run({ api, event, args, helpers, states, deco, cfg, utils });
     } catch (e) {
         log(`خطأ في الأمر ${cmd.config.name}: ${e && e.stack || e}`, 'error');
@@ -199,6 +207,11 @@ function loginOnce(login, appState) {
     });
 }
 
+/* تبديل الكوكيز يدويًا (أمر رفع كوكيز / لوحة التحكم) */
+let pendingState = null;   // كوكيز جديدة بانتظار تسجيل الدخول بها
+let wakeUp = null;         // يوقظ الحلقة إن كانت متوقفة تنتظر كوكيز
+let dropNow = null;        // يقطع الاتصال الحالي ليعيد الدخول بالكوكيز الجديدة
+
 /** يستمع للرسائل ويرجع (resolve) عند انقطاع الاتصال مع سبب الانقطاع */
 function listenUntilDrop(api) {
     return new Promise(resolve => {
@@ -206,9 +219,11 @@ function listenUntilDrop(api) {
         const finish = reason => {
             if (finished) return;
             finished = true;
+            dropNow = null;
             try { if (typeof stop === 'function') stop(); } catch (e) { /* تجاهل */ }
             resolve(reason);
         };
+        dropNow = finish;
         stop = (api.listenMqtt || api.listen).call(api, (e, event) => {
             if (finished) return;
             if (e) return finish(e);
@@ -239,8 +254,19 @@ function setupSession(api, ctx) {
     let fresh = null;
     try { // حفظ الكوكيز المحدّثة
         fresh = api.getAppState();
-        if (!ctx.fromEnv && Array.isArray(fresh) && fresh.length) fs.writeFileSync(ctx.appPath, JSON.stringify(fresh, null, 2));
+        if (!ctx.fromEnv && Array.isArray(fresh) && fresh.length) {
+            const text = JSON.stringify(fresh, null, 2);
+            fs.writeFileSync(ctx.appPath, text);
+            ctx.srcHash = session.hash(text);          // ملف المصدر تغيّر بأيدينا، لا يُعدّ تعديلًا يدويًا
+        }
     } catch (e) { /* تجاهل */ }
+    // حفظ دائم (Heba_DB/fb_cookies.json) + تحديث دوري، وcloudSync يرفعه إلى GitHub فتبقى بعد إعادة النشر
+    session.setProvider(() => { try { return api.getAppState(); } catch (e) { return null; } }, () => ctx.srcHash);
+    if (!pendingState && Array.isArray(fresh) && fresh.length) session.save(fresh, 'login', ctx.srcHash); // لا نكتب فوق كوكيز رُفعت للتو
+    autoLeave.start(api, cfg, (m, t) => log(m, t || 'LEAVE'));
+    clearInterval(ctx.refreshTimer);
+    ctx.refreshTimer = setInterval(() => session.flushNow(), Math.max(1, num('COOKIE_SAVE_MIN', 15)) * 60 * 1000);
+    ctx.refreshTimer.unref();
     return Array.isArray(fresh) && fresh.length ? fresh : null;
 }
 
@@ -255,13 +281,20 @@ async function runWithAutoReconnect(appState, ctx) {
     let delay = MIN_DELAY;
 
     for (;;) {
+        if (pendingState) {                          // كوكيز جديدة وصلت (أمر رفع كوكيز أو اللوحة)
+            appState = pendingState; pendingState = null;
+            failures = 0; delay = MIN_DELAY;
+            log.loader('تم استلام كوكيز جديدة، جارٍ الدخول بها...');
+        }
         const startedAt = Date.now();
         let problem, counted = false;
         try {
             log.loader('جارٍ تسجيل الدخول إلى فيسبوك...');
             const api = await loginOnce(login, appState);
             appState = setupSession(api, ctx) || appState;
-            const drop = await listenUntilDrop(api);
+            global.client.connectedAt = Date.now();                          // لأمر «حالة»
+            global.client.logins = (global.client.logins || 0) + 1;
+            const drop = pendingState ? 'تجديد الكوكيز يدويًا' : await listenUntilDrop(api);
             problem = errMsg(drop);
             counted = FATAL.test(problem);          // انقطاع عابر لا يُحسب، أما خطأ الجلسة فيُحسب
         } catch (e) {
@@ -274,9 +307,13 @@ async function runWithAutoReconnect(appState, ctx) {
         log(`انقطع الاتصال: ${problem}`, 'warn');
 
         if (failures >= MAX_FAILURES) {
-            log(`تكرر الفشل ${failures} مرات متتالية، أوقفت المحاولة. جدّد الكوكيز ثم أعد التشغيل.`, 'error');
-            process.exit(1);
+            // لا نغلق العملية (حتى تبقى اللوحة شغّالة ويمكنك إرسال كوكيز جديدة منها)، فقط ننتظر
+            log(`تكرر الفشل ${failures} مرات متتالية، أوقفت المحاولة. جدّد الكوكيز من لوحة التحكم (أو غيّر FB_COOKIE).`, 'error');
+            if (!pendingState) await new Promise(r => { wakeUp = r; });
+            wakeUp = null;
+            continue;
         }
+        if (pendingState) continue;                  // وصلت كوكيز جديدة أثناء الانقطاع: ادخل بها فورًا
         log.loader(`إعادة المحاولة بعد ${Math.round(delay / 1000)} ثانية (فشل متتالٍ: ${failures}/${MAX_FAILURES})`);
         await sleep(delay);
         delay = Math.min(delay * 2, MAX_DELAY);
@@ -302,16 +339,64 @@ function start() {
     const fromEnv = process.env.FB_COOKIE || process.env.APPSTATE || '';
     let rawCookies = fromEnv;
     if (!rawCookies && fs.existsSync(appPath)) rawCookies = fs.readFileSync(appPath, 'utf8');
-    if (!rawCookies) {
+
+    // الكوكيز المحفوظة (أحدث) تتقدّم على المصدر الأصلي، إلا إن غيّرتَ المصدر بنفسك (FB_COOKIE جديد مثلًا)
+    const srcHash = rawCookies ? session.hash(rawCookies) : '';
+    const saved = session.load();
+    const useSaved = !!saved && (!rawCookies || saved.srcHash === srcHash);
+    if (!rawCookies && !useSaved) {
         log('لا توجد كوكيز: أضف متغير FB_COOKIE في الاستضافة أو ضع ملف appstate.json بجانب main.js', 'error');
         process.exit(1);
     }
     let appState;
-    try { appState = parseCookies(rawCookies); }
-    catch (e) { log('مشكلة في الكوكيز: ' + e.message, 'error'); process.exit(1); }
+    if (useSaved) {
+        appState = saved.state;
+        log.loader(`الكوكيز المحفوظة (${saved.origin}) من ${saved.savedAt}`);
+    } else {
+        try { appState = parseCookies(rawCookies); }
+        catch (e) { log('مشكلة في الكوكيز: ' + e.message, 'error'); process.exit(1); }
+        if (saved) log.loader('اكتشفت كوكيز جديدة في المصدر (FB_COOKIE/appstate.json)، سأستعملها بدل المحفوظة');
+    }
+
+    const ctx = { appPath, fromEnv, srcHash };
+    // يرفع الكوكيز المحفوظة إلى GitHub ثم يحدّث FB_COOKIE في Render (إن ضُبط RENDER_API_KEY؛ تحديثه يعيد تشغيل الخدمة)
+    async function publishCookies(state) {
+        const out = { pushed: 0, render: 'skipped' };
+        try { out.pushed = Number(await require('./utils/cloudSync').pushChanges()) || 0; } catch (e) { /* تجاهل */ }
+        if (ctx.fromEnv) {                           // الكوكيز ليست من المتغير: لا حاجة لتعديل Render
+            try {
+                const r = await require('./utils/renderEnv').update(state);
+                out.render = r && r.ok ? 'ok' : 'skipped';
+                if (out.render === 'ok') log.loader('تم تحديث FB_COOKIE في Render');
+            } catch (e) { out.render = 'failed'; log('تعذّر تحديث FB_COOKIE في Render: ' + e.message, 'warn'); }
+        }
+        return out;
+    }
+
+    // يحفظ كوكيز الحساب الحالية كما هي في الجلسة الشغّالة (بدون لصق من المطور): أمر «حفظ كوكيز»
+    global.client.saveLiveCookies = async () => {
+        const api = global.client.api;
+        if (!api || typeof api.getAppState !== 'function') throw new Error('البوت غير متصل بفيسبوك الآن');
+        const state = api.getAppState();
+        if (!session.valid(state)) throw new Error('تعذّر قراءة كوكيز الجلسة الحالية');
+        session.save(state, 'manual', ctx.srcHash);
+        const r = await publishCookies(state);
+        return { count: state.length, ...r };
+    };
+
+    // كوكيز جديدة يلصقها المطور (الأمر أو اللوحة): تُحفظ ويعيد البوت الدخول بها
+    global.client.applyCookies = (state, origin) => {
+        if (!session.valid(state)) throw new Error('الكوكيز ناقصة: لازم c_user و xs');
+        session.save(state, origin || 'upload', ctx.srcHash);
+        pendingState = state;
+        session.setProvider(null);                              // لا نسمح للجلسة القديمة بالكتابة فوق الجديدة
+        if (wakeUp) { const w = wakeUp; wakeUp = null; w(); }   // كان متوقفًا ينتظر
+        else if (dropNow) setTimeout(() => { if (dropNow) dropNow('تجديد الكوكيز يدويًا'); }, 1500); // بعد إرسال رد التأكيد
+        publishCookies(state).catch(() => {});
+    };
 
     setInterval(() => {}, 1 << 30); // يمنع انتهاء العملية بصمت
-    runWithAutoReconnect(appState, { appPath, fromEnv });
+    runWithAutoReconnect(appState, ctx);
 }
 
 start();

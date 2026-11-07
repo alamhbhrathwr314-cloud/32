@@ -14,16 +14,24 @@ module.exports.config = {
     cooldowns: 10
 };
 
+/** تفاعل بإيموجي: نسخة المكتبة الحالية تشترط threadID، والفشل لا يجب أن يوقف الأمر */
+const react = (api, emoji, messageID, threadID) => {
+    try {
+        const p = api.setMessageReaction(emoji, messageID, threadID, () => {}, true);
+        if (p && typeof p.catch === 'function') p.catch(() => {});
+    } catch (e) { /* تجاهل */ }
+};
+
 module.exports.run = async function({ api, event, args, Users }) {
     const { threadID, messageID } = event;
 
-    api.setMessageReaction("🔍", messageID, () => {}, true);
+    react(api, "🔍", messageID, threadID);
 
     try {
         const threadInfo = await api.getThreadInfo(threadID);
 
         if (!threadInfo.isGroup) {
-            api.setMessageReaction("❌", messageID, () => {}, true);
+            react(api, "❌", messageID, threadID);
             return api.sendMessage("⌬ ━━ 𝗥𝗘𝗠𝗢 ━━ ⌬\n\nهذا الأمر للمجموعات فقط.", threadID, messageID);
         }
 
@@ -71,7 +79,7 @@ module.exports.run = async function({ api, event, args, Users }) {
             `👥 عدد الأعضاء: ${totalMembers}\n` +
             `👑 عدد الأدمن: ${totalAdmins}\n\n`;
 
-        api.setMessageReaction("✅", messageID, () => {}, true);
+        react(api, "✅", messageID, threadID);
 
         if (imageUrl) {
             try {
@@ -98,7 +106,7 @@ module.exports.run = async function({ api, event, args, Users }) {
 
     } catch (error) {
         console.error("خطأ في أمر مجموعتي:", error);
-        api.setMessageReaction("❌", messageID, () => {}, true);
+        react(api, "❌", messageID, threadID);
         return api.sendMessage(
             "⌬ ━━ 𝗥𝗘𝗠𝗢 ━━ ⌬\n\nتعذّر جلب معلومات المجموعة.",
             threadID, messageID

@@ -2,13 +2,16 @@
  * خادم صحة صغير: يفتح منفذ PORT ويرد 200 على أي طلب.
  * يلزم فقط عند تشغيل البوت كـ Web Service على Render (يشترط وجود منفذ)، ولا يلزم كـ Background Worker.
  * لا يعمل في وضع Messenger الرسمي (PAGE_ACCESS_TOKEN) لأن ذلك الوضع يفتح المنفذ بنفسه.
+ * لوحة التحكم: إن وُجد PANEL_PASSWORD تُعرض الصفحة الرئيسية (/) كلوحة تحكم (راجع utils/panel.js).
  * اختياري: KEEPALIVE_PING=1 يجعل البوت يزور رابطه العام كل 10 دقائق (RENDER_EXTERNAL_URL أو KEEPALIVE_URL).
  */
 const http = require('http');
+const panel = require('./panel'); // لوحة التحكم (تعمل فقط إذا وُجد PANEL_PASSWORD)
 
 if (!process.env.PAGE_ACCESS_TOKEN) {
     const port = Number(process.env.PORT) || 3000;
     const srv = http.createServer((req, res) => {
+        if (panel.handle(req, res)) return;
         res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
         res.end('kira-bot is running');
     });

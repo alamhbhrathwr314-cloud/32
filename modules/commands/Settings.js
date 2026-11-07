@@ -3,6 +3,7 @@
  *   1) 🏷️ حماية الكنية        تمنع تغيير كنية أي عضو (تُعاد كما كانت وقت التفعيل)
  *   2) 📝 حماية اسم المجموعة   تمنع تغيير الاسم
  *   3) 🖼️ حماية صورة المجموعة  تمنع تغيير الصورة
+ *   4) 🔒 منع الخروج           يعيد العضو الذي يخرج بنفسه من المجموعة (لا يعيد من طرده أدمن)
  * كل حماية تُشغَّل وتُوقَف على حدة: ردّ على رسالة القائمة برقم الإعداد، أو اكتب .اعدادات 1 [تشغيل|ايقاف]
  * عند التفعيل نحفظ لقطة من الحالة الحالية، وأي تغيير بعدها يُلغى تلقائيًا (يستقبل أحداث المجموعة عبر onEvent).
  * الإعدادات في Heba_DB/group_settings.json وصورة المجموعة المحفوظة في Heba_DB/group_images/.
@@ -17,14 +18,15 @@ const SESSION_TTL = 15 * 60 * 1000;
 
 module.exports.config = {
     name: 'اعدادات', aliases: ['settings', 'اعداد', 'الاعدادات', 'حماية'],
-    description: 'حماية المجموعة: الكنية والاسم والصورة (للأدمن والمطور)',
-    usage: 'اعدادات [رقم | كنية | اسم | صورة] [تشغيل | ايقاف]', category: 'admin', cooldown: 3, adminOnly: false
+    description: 'حماية المجموعة: الكنية والاسم والصورة ومنع الخروج (للأدمن والمطور)',
+    usage: 'اعدادات [رقم | كنية | اسم | صورة | خروج] [تشغيل | ايقاف]', category: 'admin', cooldown: 3, adminOnly: false
 };
 
 const FEATURES = [
     { key: 'nick',  n: 1, emoji: '🏷️', name: 'حماية الكنية',         words: ['كنية', 'كنيه', 'الكنية', 'nick'] },
     { key: 'name',  n: 2, emoji: '📝', name: 'حماية اسم المجموعة',   words: ['اسم', 'الاسم', 'name'] },
-    { key: 'image', n: 3, emoji: '🖼️', name: 'حماية صورة المجموعة',  words: ['صورة', 'صوره', 'الصورة', 'image'] }
+    { key: 'image', n: 3, emoji: '🖼️', name: 'حماية صورة المجموعة',  words: ['صورة', 'صوره', 'الصورة', 'image'] },
+    { key: 'antileave', n: 4, emoji: '🔒', name: 'منع الخروج',          words: ['خروج', 'الخروج', 'منع', 'منع_الخروج', 'leave', 'antileave'] }
 ];
 const ON_WORDS = ['تشغيل', 'تفعيل', 'فتح', 'on', 'شغل'];
 const OFF_WORDS = ['ايقاف', 'إيقاف', 'تعطيل', 'اطفاء', 'إطفاء', 'off', 'وقف'];
@@ -65,6 +67,11 @@ async function enable(api, tid, feature) {
     } else if (feature.key === 'name') {
         if (!info.threadName) return { error: 'المجموعة بلا اسم، ضع لها اسمًا أولًا ثم فعّل الحماية' };
         st.name = { on: true, value: info.threadName };
+    } else if (feature.key === 'antileave') {
+        st.antileave = { on: true };
+        all[tid] = st; writeAll(all);
+        const botIsAdmin = isGroupAdmin(info, api.getCurrentUserID());
+        return { ok: true, warn: info.approvalMode && !botIsAdmin ? '⚠️ المجموعة تطلب موافقة الأدمن على الأعضاء الجدد، اجعل البوت أدمن ليعيد الأعضاء مباشرة' : '' };
     } else {
         if (!info.imageSrc) return { error: 'المجموعة بلا صورة، ضع لها صورة أولًا ثم فعّل الحماية' };
         try {
@@ -95,7 +102,7 @@ async function apply(api, tid, feature, desired) {
     if (want === on) return `${feature.emoji} ${feature.name} ${on ? 'مفعّلة' : 'متوقفة'} أصلًا`;
     if (want) {
         const r = await enable(api, tid, feature);
-        return r.error ? `⚠️ ${r.error}` : `✅ تم تفعيل ${feature.name}`;
+        return r.error ? `⚠️ ${r.error}` : `✅ تم تفعيل ${feature.name}${r.warn ? '\n' + r.warn : ''}`;
     }
     disable(tid, feature);
     return `⛔ تم إيقاف ${feature.name}`;
@@ -160,17 +167,52 @@ function guard(map, key, ms) {
     map.set(key, now);
     return true;
 }
+const readds = new Map(); // `${tid}:${uid}` ← أوقات الإعادة خلال آخر ساعة
+const MAX_READD_PER_HOUR = 3; // لا نُعيد من يخرج أكثر من 3 مرات في الساعة (يخفف خطر الحظر من فيسبوك)
+function allowReadd(tid, uid) {
+    const key = `${tid}:${uid}`, now = Date.now();
+    const list = (readds.get(key) || []).filter(t => now - t < 3600000);
+    if (list.length >= MAX_READD_PER_HOUR) { readds.set(key, list); return false; }
+    list.push(now); readds.set(key, list);
+    return true;
+}
 const call = (fn) => new Promise(resolve => { try { fn(err => resolve(err || null)); } catch (e) { resolve(e); } });
 
-module.exports.onEvent = async ({ api, event }) => {
+module.exports.onEvent = async ({ api, event, helpers }) => {
     const type = event.logMessageType;
-    if (!['log:thread-name', 'log:user-nickname', 'log:thread-image'].includes(type)) return;
+    if (!['log:thread-name', 'log:user-nickname', 'log:thread-image', 'log:unsubscribe'].includes(type)) return;
     if (String(event.author) === String(api.getCurrentUserID())) return; // تغييرات البوت نفسه
     const tid = String(event.threadID);
     const st = readAll()[tid];
     if (!st) return;
     const data = event.logMessageData || {};
     const notice = (key, text) => { if (guard(noticed, `${tid}:${key}`, 30000)) { try { api.sendMessage(text, tid); } catch (e) { /* تجاهل */ } } };
+
+    if (type === 'log:unsubscribe' && st.antileave && st.antileave.on) {
+        const left = String(data.leftParticipantFbId || '');
+        if (!left || left === String(api.getCurrentUserID())) return;      // خروج البوت نفسه: لا نستطيع إعادته
+        const author = String(event.author || '');
+        if (author && author !== left) return;                              // طرده أدمن: لا نتدخل
+        if (!guard(recent, `${tid}:leave:${left}`, 5000)) return;
+        if (!allowReadd(tid, left)) {
+            return notice('leave-cap', '🔒 منع الخروج: هذا العضو خرج مرارًا، توقفت عن إعادته');
+        }
+        await sleep(1500);
+        const err = await call(cb => api.addUserToGroup(left, tid, cb));
+        if (err) {
+            logWarn(`منع الخروج: تعذّرت إعادة ${left} (${(err && (err.error || err.message)) || err})`);
+            return notice('leave-fail', '⚠️ منع الخروج: تعذّرت إعادة العضو (قد يكون حظر البوت أو أغلق خصوصيته)');
+        }
+        let name = '';
+        try { name = String(await helpers.getName(api, left) || '').trim(); } catch (e) { /* بدون منشن */ }
+        if (guard(noticed, `${tid}:leave`, 10000)) {
+            try {
+                api.sendMessage(name
+                    ? { body: `🔒 منع الخروج مفعّل: أُعيد ${name} إلى المجموعة`, mentions: [{ tag: name, id: left }] }
+                    : '🔒 منع الخروج مفعّل: أُعيد العضو إلى المجموعة', tid);
+            } catch (e) { /* تجاهل */ }
+        }
+    }
 
     if (type === 'log:user-nickname' && st.nick && st.nick.on) {
         const pid = String(data.participant_id);

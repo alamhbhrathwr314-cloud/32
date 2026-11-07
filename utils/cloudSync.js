@@ -88,6 +88,7 @@ async function putFile(name, buf) {
 /** يرفع الملفات التي تغيّرت منذ آخر رفع */
 async function pushChanges() {
     if (!enabled() || pushing) return 0;
+    try { require('./session').flushNow(); } catch (e) { /* حفظ أحدث كوكيز قبل الرفع */ }
     pushing = true; let n = 0;
     try {
         if (!ready) { // فشل الاسترجاع عند التشغيل: نعيد المحاولة، وعند النجاح تُنزَّل نسخة GitHub فوق المحلي (المحلي حديث جدًا)

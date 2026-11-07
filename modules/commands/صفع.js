@@ -33,12 +33,8 @@ const call = (api, method, ...args) => new Promise(resolve => {
     catch (e) { resolve(null); }
 });
 
-async function fetchAvatar(url) {
-    if (!url) return null;
-    try {
-        const res = await axios.get(url, { responseType: 'arraybuffer', timeout: 8000, maxContentLength: 5 * 1024 * 1024 });
-        return Buffer.from(res.data);
-    } catch (e) { return null; }
+async function fetchAvatar(url, uid) {
+    try { return await require('../../utils/avatar').fetchAvatar(url, uid); } catch (e) { return null; }
 }
 
 /* ─────────── القوالب والمواضع ─────────── */
@@ -142,7 +138,7 @@ module.exports.run = async ctx => {
     const info = (await call(api, 'getUserInfo', [sender, target])) || {};
     const nameOf = id => (info[id] && info[id].name) || `مستخدم ${id.slice(-4)}`;
     const thumbOf = id => { const u = info[id] || {}; return u.thumbSrc || u.avatar || u.profilePicture || null; };
-    const [imgA, imgB] = await Promise.all([fetchAvatar(thumbOf(sender)), fetchAvatar(thumbOf(target))]);
+    const [imgA, imgB] = await Promise.all([fetchAvatar(thumbOf(sender), sender), fetchAvatar(thumbOf(target), target)]);
 
     let out = null, ext = 'jpg';
     try { // القالب أولًا

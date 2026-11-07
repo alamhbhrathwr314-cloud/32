@@ -47,7 +47,7 @@ module.exports.run = async function({ api, event, args, cfg }) {
         }
 
         // بناء قائمة المجموعات
-        let text = `⌬ ━━ 𝗥𝗘𝗠𝗢 𝗚𝗥𝗢𝗨𝗣𝗦 ━━ ⌬\n\n`;
+        let text = `⌬ ━━ 𝗥𝗘𝗠𝗢 ━━ ⌬\n\n`;
         text += `📊 إجمالي المجموعات: ${groups.length}\n\n`;
 
         groups.forEach((g, i) => {
@@ -55,8 +55,8 @@ module.exports.run = async function({ api, event, args, cfg }) {
             const members = g.participantIDs ? g.participantIDs.length : 0;
             const id = g.threadID;
             text += `${i + 1}. ${name}\n`;
-            text += `   👥 الأعضاء: ${members}\n`;
-            text += `   🆔 ${id}\n\n`;
+            text += `    الأعضاء: ${members}\n`;
+            text += `    ${id}\n\n`;
         });
 
         // إذا كان النص طويلاً، نقسمه

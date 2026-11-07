@@ -1,13 +1,8 @@
 /**
- * 🖼️ البحث عن الصور بدون مفتاح.
- * المصادر بالترتيب (يجرّب التالي إذا فشل أو قلّت النتائج):
- *   1) Bing Images (قراءة صفحة النتائج، أصل الصورة بجودتها الكاملة)
- *   2) DuckDuckGo Images (JSON غير رسمي)
- *   3) Openverse (واجهة رسمية مفتوحة لصور مرخّصة، بدون مفتاح)
- * ملاحظة: المصدران الأولان غير رسميين وقد يتغيّر شكلهما، لذلك الاحتياطي موجود دائمًا.
+ * 🖼️ البحث عن الصور بدون مفتاح عبر DuckDuckGo Images فقط (JSON غير رسمي).
+ * ملاحظة: المصدر غير رسمي وقد يتغيّر شكله أو يمنع سيرفرات الاستضافة أحيانًا.
  */
 const UA = 'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Mobile Safari/537.36';
-const decodeHtml = s => String(s).replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/&#39;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>');
 
 async function getText(url, headers = {}, timeout = 12000) {
     const ctrl = new AbortController(); const timer = setTimeout(() => ctrl.abort(), timeout);
@@ -16,32 +11,6 @@ async function getText(url, headers = {}, timeout = 12000) {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         return await res.text();
     } finally { clearTimeout(timer); }
-}
-
-/* ───── Bing ───── */
-function parseBing(html) {
-    const out = [], seen = new Set();
-    const push = (url, thumb, title) => {
-        if (!url || !/^https?:\/\//i.test(url) || seen.has(url)) return;
-        seen.add(url); out.push({ url, thumb: thumb || null, w: 0, h: 0, title: title || '' });
-    };
-    const re = /\sm=(?:"|')(\{[^"']*?murl[^"']*?\})(?:"|')/g;
-    let m;
-    while ((m = re.exec(html))) {
-        try { const j = JSON.parse(decodeHtml(m[1])); push(j.murl, j.turl, j.t); } catch (e) { /* عنصر تالف */ }
-    }
-    // احتياط: إن تغيّر شكل الصفحة نلتقط الروابط مباشرة من الحقل murl
-    if (!out.length) {
-        const re2 = /(?:&quot;|\\?")murl(?:&quot;|\\?")\s*:\s*(?:&quot;|\\?")(https?:[^"&\\]+?)(?:&quot;|\\?")/g;
-        while ((m = re2.exec(html))) push(decodeHtml(m[1]), null, '');
-    }
-    // الأبعاد الحقيقية تُقرأ من الصورة نفسها بعد تنزيلها (ربطها بالترتيب من الصفحة غير موثوق)
-    return out;
-}
-async function bing(q) {
-    const url = `https://www.bing.com/images/search?q=${encodeURIComponent(q)}&form=HDRSC2&first=1&count=35&adlt=strict&qft=+filterui:imagesize-large`;
-    const html = await getText(url, { Cookie: 'SRCHHPGUSR=ADLT=STRICT', Referer: 'https://www.bing.com/' });
-    return parseBing(html);
 }
 
 /* ───── DuckDuckGo ───── */
@@ -57,25 +26,12 @@ async function ddg(q) {
     return parseDdg(JSON.parse(txt));
 }
 
-/* ───── Openverse ───── */
-function parseOpenverse(json) {
-    return ((json && json.results) || []).filter(r => r && /^https?:\/\//i.test(r.url || ''))
-        .map(r => ({ url: r.url, thumb: r.thumbnail || null, w: Number(r.width) || 0, h: Number(r.height) || 0, title: r.title || '' }));
-}
-async function openverse(q) {
-    const txt = await getText(`https://api.openverse.org/v1/images/?q=${encodeURIComponent(q)}&page_size=30&mature=false`);
-    return parseOpenverse(JSON.parse(txt));
-}
-
-/** يرجع المرشّحين بترتيب الصلة من المصدر (Bing ثم DuckDuckGo ثم Openverse) بدون تكرار */
+/** يرجع المرشّحين بترتيب الصلة من DuckDuckGo بدون تكرار */
 async function search(q) {
     const seen = new Set(); const all = [];
-    for (const src of [bing, ddg, openverse]) {
-        try {
-            for (const r of await src(q)) { const k = r.url.split('?')[0]; if (!seen.has(k)) { seen.add(k); all.push(r); } }
-        } catch (e) { /* ننتقل للمصدر التالي */ }
-        if (all.length >= 15) break;
-    }
+    try {
+        for (const r of await ddg(q)) { const k = r.url.split('?')[0]; if (!seen.has(k)) { seen.add(k); all.push(r); } }
+    } catch (e) { console.log(`[imageSearch] DuckDuckGo فشل: ${e.message}`); }
     return all;
 }
 
@@ -158,4 +114,4 @@ async function pickImages(cands, n, opts = {}) {
     return [...good.sort(byIdx), ...webps.sort(byIdx), ...smalls.sort(byIdx)].slice(0, n);
 }
 
-module.exports = { search, pickImages, download, parseBing, parseDdg, parseOpenverse, kind, dims };
+module.exports = { search, pickImages, download, parseDdg, kind, dims };

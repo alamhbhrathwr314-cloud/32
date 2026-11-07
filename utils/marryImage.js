@@ -5,6 +5,8 @@
  * مكتبات: jpeg-js و pngjs (جافاسكربت صرف) لفك صور البروفايل، والترميز بـ zlib المدمجة.
  */
 const zlib = require('zlib');
+const fs = require('fs');
+const path = require('path');
 
 const W = 900, H = 500;
 const CY = 245, R = 150, RING = 10;
@@ -141,6 +143,37 @@ function sampleBilinear(img, u, v) {
     return out;
 }
 
+/* ───────── خلفية مخصّصة (يغيّرها المطور بالأمر رفع أو من لوحة التحكم) ───────── */
+const BG_BASE = path.join(__dirname, '..', 'assets', 'marry', 'background');
+let bgCache = { key: '', data: null };
+
+/** يرجع نسخة من لوحة الرسم مملوءة بالصورة المخصّصة (تغطية كاملة بقص من المنتصف)، أو null إن لم توجد */
+function customBackground() {
+    for (const e of ['jpg', 'jpeg', 'png']) {
+        const p = `${BG_BASE}.${e}`;
+        try {
+            const st = fs.statSync(p);
+            const key = `${p}:${st.mtimeMs}:${st.size}`;
+            if (bgCache.key !== key) {
+                const img = decodeImage(fs.readFileSync(p));
+                if (!img) continue; // صورة تالفة: نستعمل التصميم الافتراضي
+                const data = new Uint8ClampedArray(W * H * 4);
+                const k = Math.max(W / img.width, H / img.height);
+                for (let y = 0; y < H; y++) {
+                    for (let x = 0; x < W; x++) {
+                        const c = sampleBilinear(img, (x + 0.5 - W / 2) / k + img.width / 2, (y + 0.5 - H / 2) / k + img.height / 2);
+                        const i = (y * W + x) * 4;
+                        data[i] = c[0]; data[i + 1] = c[1]; data[i + 2] = c[2]; data[i + 3] = 255;
+                    }
+                }
+                bgCache = { key, data };
+            }
+            return new Uint8ClampedArray(bgCache.data);
+        } catch (err) { /* غير موجودة: نجرّب الامتداد التالي */ }
+    }
+    return null;
+}
+
 function seedColor(seed) {
     let h = 0;
     for (const ch of String(seed)) h = (h * 33 + ch.charCodeAt(0)) >>> 0;
@@ -209,12 +242,15 @@ function drawAvatar(data, cx, cy, img, seed) {
  * @returns {Buffer} صورة PNG
  */
 function makeMarryImage(bufA, bufB, seedA = 'a', seedB = 'b') {
-    const data = createCanvas();
+    const custom = customBackground();
+    const data = custom || createCanvas();
 
-    // قلوب صغيرة في الخلفية
-    for (const [x, y, s, a] of [[90, 70, 20, 0.28], [810, 85, 26, 0.25], [450, 62, 15, 0.3], [150, 440, 24, 0.25],
-        [770, 430, 20, 0.28], [455, 448, 28, 0.22], [330, 48, 12, 0.25], [600, 440, 14, 0.25], [45, 250, 14, 0.2], [860, 270, 15, 0.2]]) {
-        drawHeart(data, x, y, s, solid(255, 255, 255), a);
+    // قلوب صغيرة في الخلفية (فقط مع التصميم الافتراضي، وتُترك الصورة المخصّصة نظيفة)
+    if (!custom) {
+        for (const [x, y, s, a] of [[90, 70, 20, 0.28], [810, 85, 26, 0.25], [450, 62, 15, 0.3], [150, 440, 24, 0.25],
+            [770, 430, 20, 0.28], [455, 448, 28, 0.22], [330, 48, 12, 0.25], [600, 440, 14, 0.25], [45, 250, 14, 0.2], [860, 270, 15, 0.2]]) {
+            drawHeart(data, x, y, s, solid(255, 255, 255), a);
+        }
     }
 
     drawAvatar(data, CX_A, CY, decodeImage(bufA), seedA);

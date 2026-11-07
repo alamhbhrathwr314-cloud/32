@@ -2,6 +2,7 @@
  * 🎴 مستوى — بطاقة صورة بتفاصيل حسابك ومستواك (صورة الحساب، المستوى، الخبرة، الرصيد، الرتبة، المخزون، الترتيب).
  *   .مستوى            بطاقتك
  *   .مستوى @شخص       بطاقة شخص آخر (أو ردًا على رسالته)
+ * خلفية البطاقة: يمكن للمطور رفع صورة بأمر .رفع (الخيار «مستوى»)، فتُرسم الخلفية بها مع تعتيم خفيف وإطارات للبيانات.
  * البطاقة تُرسم بالكود بلا مكتبات رسم. الكلمات العربية والأرقام صور حروف مضمّنة في هذا الملف،
  * فلا يلزم أي خط. مكتبة axios تجلب صورة الحساب، وإن فشل الجلب تظهر صورة بديلة.
  */
@@ -54,6 +55,37 @@ function background(acc) {
         d[i] = r * v; d[i + 1] = g * v; d[i + 2] = b * v; d[i + 3] = 255;
     }
     return d;
+}
+
+/* ═══════════ خلفية مخصّصة (assets/level/background.jpg|jpeg|png) ═══════════ */
+const BG_DIR = path.join(__dirname, '..', '..', 'assets', 'level');
+let bgCache = { key: '', data: null };
+
+/** يعيد بكسلات الخلفية المخصّصة (مقصوصة لتملأ البطاقة ومعتّمة قليلًا) أو null إن لم توجد */
+function customBackground() {
+    try {
+        const file = ['jpg', 'jpeg', 'png'].map(e => path.join(BG_DIR, `background.${e}`)).find(f => fs.existsSync(f));
+        if (!file) { bgCache = { key: '', data: null }; return null; }
+        const st = fs.statSync(file), key = `${file}:${st.mtimeMs}:${st.size}`;
+        if (bgCache.key === key) return bgCache.data;          // لا نعيد الفك والرسم إلا عند تغيّر الملف
+        const img = decodeImage(fs.readFileSync(file));
+        if (!img || !img.width || !img.height) return null;
+        const out = new Uint8ClampedArray(W * H * 4);
+        const s = Math.max(W / img.width, H / img.height);     // تغطية كاملة بقصّ من الوسط
+        const ox = (img.width - W / s) / 2, oy = (img.height - H / s) / 2;
+        for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+            let r = 0, g = 0, b = 0;
+            for (const [dx, dy] of [[0.25, 0.25], [0.75, 0.25], [0.25, 0.75], [0.75, 0.75]]) {
+                const c = sample(img, ox + (x + dx) / s, oy + (y + dy) / s);
+                r += c[0] / 4; g += c[1] / 4; b += c[2] / 4;
+            }
+            const v = 0.58 * (1 - 0.3 * Math.pow(Math.hypot(x / W - 0.5, y / H - 0.5) * 1.5, 2));   // تعتيم + حواف أغمق
+            const i = (y * W + x) * 4;
+            out[i] = r * v; out[i + 1] = g * v; out[i + 2] = b * v; out[i + 3] = 255;
+        }
+        bgCache = { key, data: out };
+        return out;
+    } catch (e) { return null; }
 }
 
 /** مستطيل بزوايا دائرية: color مصفوفة RGB أو دالة (x,y)⇒RGB. stroke>0 يرسم إطارًا فقط */
@@ -142,7 +174,13 @@ function avatar(d, cx, cy, R, img, acc) {
 /** يرسم البطاقة كاملة ويعيد بكسلات RGBA */
 function makeCard({ level, xp, need, points, inventory, position, total, img }) {
     const tier = tierOf(level), acc = ACCENTS[tier];
-    const d = background(acc);
+    const custom = customBackground();
+    const d = custom ? custom.slice() : background(acc);
+    if (custom) {                                   // ألواح معتمة خلف البيانات لتبقى مقروءة فوق أي صورة
+        roundRect(d, 30, 14, 900, 80, 20, [8, 8, 18], 0.5);
+        roundRect(d, 30, 100, 610, 430, 28, [8, 8, 18], 0.5);
+        roundRect(d, 650, 100, 280, 430, 28, [8, 8, 18], 0.32);
+    }
     const XR = 620, XL = 50, pct = need > 0 ? clamp01(xp / need) : 0;
 
     // العنوان وخط تحته
@@ -211,12 +249,8 @@ function encodePng(rgba) {
 const call = (api, method, ...args) => new Promise(resolve => {
     try { api[method](...args, (err, data) => resolve(err ? null : data)); } catch (e) { resolve(null); }
 });
-async function fetchAvatar(url) {
-    if (!url || !axios) return null;
-    try {
-        const res = await axios.get(url, { responseType: 'arraybuffer', timeout: 8000, maxContentLength: 5 * 1024 * 1024 });
-        return Buffer.from(res.data);
-    } catch (e) { return null; }
+async function fetchAvatar(url, uid) {
+    try { return await require('../../utils/avatar').fetchAvatar(url, uid); } catch (e) { return null; }
 }
 
 module.exports.config = {
@@ -242,7 +276,7 @@ module.exports.run = async ({ api, event, args, helpers, states, deco }) => {
     try {
         const info = (await call(api, 'getUserInfo', [uid])) || {};
         const u = info[uid] || {};
-        const img = decodeImage(await fetchAvatar(u.thumbSrc || u.avatar || u.profilePicture || null));
+        const img = decodeImage(await fetchAvatar(u.thumbSrc || u.avatar || u.profilePicture || null, uid));
         const rgba = makeCard({ level: d.level, xp: d.xp, need, points: d.points, inventory, position, total: ranking.length, img });
         file = path.join(os.tmpdir(), `kira-level-${Date.now()}-${Math.floor(Math.random() * 1e6)}.png`);
         fs.writeFileSync(file, encodePng(rgba));

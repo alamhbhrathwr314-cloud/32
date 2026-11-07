@@ -6,6 +6,7 @@
  *   2) يعرض البوت الأوامر التي تستعمل صورًا، ردّ برقم الأمر (أو اكتب .رفع <رقم>)
  *      - الرقم وحده: يستبدل الصور القديمة بالجديدة
  *      - الرقم + اضافة: (للأوامر ذات المجلد) يضيف الصورة بجانب القديمة
+ *      - الرقم + حذف: (لخلفيتَي المستوى والزواج) يحذف الخلفية المخصّصة ويعود للتصميم الافتراضي
  *   3) يحفظ البوت الصورة مكان القديمة فورًا، بلا إعادة تشغيل.
  *
  * الحفظ بعد إعادة النشر: الصور تُخزَّن أيضًا في Heba_DB/custom_images.json
@@ -29,14 +30,19 @@ const MAX_BYTES = 6 * 1024 * 1024;
 const TTL = 3 * 60 * 1000;
 const CANCEL = ['الغاء', 'إلغاء', 'cancel'];
 const ADD_WORDS = ['اضافة', 'إضافة', 'اضافه', 'add'];
+const DEL_WORDS = ['حذف', 'ازالة', 'إزالة', 'delete'];
 
 /** الأوامر التي تقرأ صورًا من assets (kind=file: صورة واحدة باسم ثابت، kind=dir: مجلد صور) */
 const TARGETS = [
     { key: 'help',    label: 'اوامر (قائمة الأوامر)',          kind: 'file', file: path.join(ASSETS, 'help') },
     { key: 'divorce', label: 'طلاق',                            kind: 'dir',  dir: path.join(ASSETS, 'divorce') },
     { key: 'slap',    label: 'صفع (قالب الصفعة)',               kind: 'dir',  dir: path.join(ASSETS, 'slap') },
-    { key: 'lock',    label: 'القفل (إضافة البوت من غير المطور)', kind: 'file', file: path.join(ASSETS, 'lock') }
+    { key: 'lock',    label: 'القفل (إضافة البوت من غير المطور)', kind: 'file', file: path.join(ASSETS, 'lock') },
+    { key: 'level',   label: 'مستوى (خلفية بطاقة المستوى)',     kind: 'file', file: path.join(ASSETS, 'level', 'background') },
+    { key: 'marry',   label: 'زواج (خلفية صورة الزواج)',        kind: 'file', file: path.join(ASSETS, 'marry', 'background') }
 ];
+// الأهداف التي لها تصميم افتراضي يمكن العودة إليه بالحذف
+const REMOVABLE = ['level', 'marry'];
 
 /* ─────────── التخزين الدائم ─────────── */
 const readStore = () => { try { return JSON.parse(fs.readFileSync(STORE, 'utf8')) || {}; } catch (e) { return {}; } };
@@ -92,6 +98,15 @@ function saveImage(t, buf, ext, add) {
     return list.length;
 }
 
+
+/** يحذف الصورة المخصّصة لهدف (للخلفية فقط): من القرص ومن التخزين الدائم */
+function removeTarget(t) {
+    for (const e of ['jpg', 'jpeg', 'png']) { try { fs.unlinkSync(`${t.file}.${e}`); } catch (err) { /* غير موجود */ } }
+    const store = readStore();
+    delete store[t.key];
+    writeStore(store);
+}
+
 /* ─────────── الصورة المرفقة ─────────── */
 const toLatinDigits = s => String(s).replace(/[٠-٩]/g, d => '٠١٢٣٤٥٦٧٨٩'.indexOf(d));
 
@@ -133,6 +148,7 @@ function menu(deco, prefix) {
         '',
         '↩️ ردّ برقم الأمر، أو اكتب: ' + prefix + 'رفع <رقم>',
         '➕ للأوامر ذات الصور المتعددة: أضف كلمة «اضافة» بعد الرقم لإضافتها بدل الاستبدال',
+        '🗑️ لحذف خلفية المستوى أو الزواج والعودة للافتراضي: أضف كلمة «حذف» بعد الرقم',
         '❌ «الغاء» للإلغاء (تنتهي المهلة بعد 3 دقائق)'
     ].join('\n'));
 }
@@ -151,6 +167,7 @@ async function choose(ctx, p, text) {
     }
     const words = clean.split(/\s+/).filter(Boolean);
     const add = words.some(w => ADD_WORDS.includes(w.toLowerCase()));
+    const del = words.some(w => DEL_WORDS.includes(w.toLowerCase()));
     const numWord = words.find(w => /^\d{1,2}$/.test(w));
     if (!numWord) return false;
     const n = parseInt(numWord, 10);
@@ -159,11 +176,23 @@ async function choose(ctx, p, text) {
         return true;
     }
     const t = TARGETS[n - 1];
+    if (del) {
+        if (!REMOVABLE.includes(t.key)) {
+            const nums = REMOVABLE.map(k => TARGETS.findIndex(x => x.key === k) + 1).join(' أو ');
+            await say(deco.warning('الحذف متاح لخلفيتَي المستوى والزواج فقط (الرقم ' + nums + ')')); return true;
+        }
+        pending.delete(key);
+        try { removeTarget(t); await say(deco.successLine(`🗑️ حُذفت الخلفية المخصّصة لـ«${t.label}» وعاد التصميم الافتراضي`)); }
+        catch (e) { await say(deco.errorBox('تعذّر الحذف: ' + (e && e.message || e))); }
+        return true;
+    }
     pending.delete(key);
     try {
         const count = saveImage(t, p.buf, p.ext, add && t.kind === 'dir');
         const lines = [`✅ تم تغيير صورة «${t.label}»`];
         if (t.kind === 'dir') lines.push(add ? `➕ أُضيفت للمجلد (المجموع ${count})` : '🔄 استُبدلت الصور القديمة بالجديدة');
+        if (t.key === 'level') lines.push(`🎴 جرّب الآن: ${cfg.getPrefix()}مستوى`);
+        if (t.key === 'marry') lines.push(`💒 جرّب الآن: ${cfg.getPrefix()}زواج @شخص`);
         if (t.key === 'slap') lines.push(`📐 إن اختلفت أماكن الوجوه: ${cfg.getPrefix()}صفع شبكة ثم ${cfg.getPrefix()}صفع ضبط`);
         await say(deco.successLine(lines.join('\n')));
     } catch (e) {
