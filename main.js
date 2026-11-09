@@ -27,6 +27,7 @@ const users = require('./utils/db/users');
 const helpers = require('./utils/helpers');
 const power = require('./utils/power');
 const { parseCookies } = require('./utils/cookies');
+const credLogin = require('./utils/credLogin'); // دخول احتياطي ببيانات الحساب (FB_EMAIL / FB_PASSWORD)
 const session = require('./utils/session'); // حفظ الكوكيز المحدّثة (يرفعها cloudSync إلى GitHub)
 const autoLeave = require('./utils/autoLeave'); // مغادرة مجموعات «طلبات المراسلة» تلقائيًا
 const panel = require('./utils/panel'); // لوحة التحكم الويب (لا تعمل إلا مع PANEL_PASSWORD)
@@ -158,13 +159,15 @@ async function handleMessage(api, event) {
 
 /* ─────────── تسجيل الدخول ─────────── */
 function findFCA() {
-    const candidates = [process.env.FCA_MODULE, config.FCA_MODULE, '@dongdev/fca-unofficial', 'fca-unofficial', 'ws3-fca'].filter(Boolean);
+    const candidates = [process.env.FCA_MODULE, config.FCA_MODULE, '@dongdev/fca-unofficial', 'biar-fca', 'nexus-fca', 'fca-unofficial', 'ws3-fca'].filter(Boolean);
     for (const name of candidates) {
         try {
             const lib = require(name);
             let version = '?';
             try { version = require(name + '/package.json').version; } catch (e) { /* تجاهل */ }
             log.loader(`مكتبة الدخول: ${name}@${version}`);
+            // بعض المكتبات (biar-fca / nexus-fca) تصدّر دالة الدخول داخل كائن
+            if (typeof lib !== 'function') lib = lib.login || lib.default || lib;
             return lib;
         } catch (e) { if (e.code !== 'MODULE_NOT_FOUND') throw e; }
     }
@@ -279,6 +282,8 @@ async function runWithAutoReconnect(appState, ctx) {
     const login = findFCA();
     let failures = 0;
     let delay = MIN_DELAY;
+    const CRED_MAX = num('FB_LOGIN_MAX_TRIES', 2);   // محاولات الدخول ببيانات الحساب لكل تشغيل (لحماية الحساب)
+    let credTries = 0;
 
     for (;;) {
         if (pendingState) {                          // كوكيز جديدة وصلت (أمر رفع كوكيز أو اللوحة)
@@ -290,7 +295,9 @@ async function runWithAutoReconnect(appState, ctx) {
         let problem, counted = false;
         try {
             log.loader('جارٍ تسجيل الدخول إلى فيسبوك...');
-            const api = await loginOnce(login, appState);
+            let api;
+            if (appState) api = await loginOnce(login, appState);
+            else { credTries++; log.loader(`الدخول ببيانات الحساب (محاولة ${credTries}/${CRED_MAX})...`); api = await credLogin.login(login, { timeout: LOGIN_TIMEOUT * 2, log }); }
             appState = setupSession(api, ctx) || appState;
             global.client.connectedAt = Date.now();                          // لأمر «حالة»
             global.client.logins = (global.client.logins || 0) + 1;
@@ -305,6 +312,13 @@ async function runWithAutoReconnect(appState, ctx) {
         if (Date.now() - startedAt > STABLE_MS) { failures = 0; delay = MIN_DELAY; } // كان الاتصال مستقرًا
         if (counted) failures++;
         log(`انقطع الاتصال: ${problem}`, 'warn');
+
+        // الكوكيز انتهت: نجرّب الدخول ببيانات الحساب (محدود المحاولات)، وإلا ننتظر كوكيز جديدة
+        if (appState && credLogin.has() && credTries < CRED_MAX && /not logged in|expired|invalid|login|checkpoint/i.test(problem)) {
+            log('الكوكيز لم تعد صالحة، سأجرّب الدخول ببيانات الحساب', 'warn');
+            appState = null; failures = 0;
+        }
+        if (!appState && credTries >= CRED_MAX) failures = MAX_FAILURES;
 
         if (failures >= MAX_FAILURES) {
             // لا نغلق العملية (حتى تبقى اللوحة شغّالة ويمكنك إرسال كوكيز جديدة منها)، فقط ننتظر
@@ -337,24 +351,32 @@ function start() {
     const appPath = path.join(__dirname, config.APPSTATE_PATH || 'appstate.json');
     // الأولوية لمتغير البيئة FB_COOKIE (مناسب للاستضافة)، ثم ملف appstate.json
     const fromEnv = process.env.FB_COOKIE || process.env.APPSTATE || '';
-    let rawCookies = fromEnv;
+    let rawCookies = String(fromEnv || '').trim();
     if (!rawCookies && fs.existsSync(appPath)) rawCookies = fs.readFileSync(appPath, 'utf8');
+    rawCookies = String(rawCookies || '').trim();
+    if (/^(\[\s*\]|\{\s*\})$/.test(rawCookies)) rawCookies = '';   // ملف فارغ أو [] أو {} = لا توجد كوكيز
 
     // الكوكيز المحفوظة (أحدث) تتقدّم على المصدر الأصلي، إلا إن غيّرتَ المصدر بنفسك (FB_COOKIE جديد مثلًا)
     const srcHash = rawCookies ? session.hash(rawCookies) : '';
     const saved = session.load();
     const useSaved = !!saved && (!rawCookies || saved.srcHash === srcHash);
-    if (!rawCookies && !useSaved) {
-        log('لا توجد كوكيز: أضف متغير FB_COOKIE في الاستضافة أو ضع ملف appstate.json بجانب main.js', 'error');
+    if (!rawCookies && !useSaved && !credLogin.has()) {
+        log('لا توجد كوكيز: أضف متغير FB_COOKIE أو ضع ملف appstate.json بجانب main.js، أو أضف FB_EMAIL و FB_PASSWORD للدخول ببيانات الحساب', 'error');
         process.exit(1);
     }
-    let appState;
-    if (useSaved) {
+    let appState = null;
+    if (!rawCookies && !useSaved) {
+        log.loader('لا توجد كوكيز: سأسجّل الدخول ببيانات الحساب (FB_EMAIL / FB_PASSWORD)');
+    } else if (useSaved) {
         appState = saved.state;
         log.loader(`الكوكيز المحفوظة (${saved.origin}) من ${saved.savedAt}`);
     } else {
         try { appState = parseCookies(rawCookies); }
-        catch (e) { log('مشكلة في الكوكيز: ' + e.message, 'error'); process.exit(1); }
+        catch (e) {
+            if (!credLogin.has()) { log('مشكلة في الكوكيز: ' + e.message, 'error'); process.exit(1); }
+            log('مشكلة في الكوكيز: ' + e.message + ' — سأجرّب الدخول ببيانات الحساب', 'warn');
+            appState = null;
+        }
         if (saved) log.loader('اكتشفت كوكيز جديدة في المصدر (FB_COOKIE/appstate.json)، سأستعملها بدل المحفوظة');
     }
 

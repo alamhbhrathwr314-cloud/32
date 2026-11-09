@@ -1,134 +1,175 @@
 /**
- * ◈ ───『 سلوك شبيه بالبشر 』─── ◈
- * - يُظهر حالة "نشط الآن" ويجددها دوريًا
- * - يضع علامة "تمت القراءة" على كل رسالة واردة (مجموعات وخاص) حتى لو لم تكن أمرًا
- * - يُظهر "يكتب الآن..." قبل كل رد بمدة تناسب طول النص
- * - يرسل الردود بالتتابع مع فاصل عشوائي بدل إرسال دفعة واحدة
+ * ◈ ───『 السلوك البشري — humanize.js 』─── ◈
+ * يضع في utils/humanize.js. يستدعيه main.js:
+ *   humanize.wrap(api)            عند تسجيل الدخول (يلفّ api.sendMessage)
+ *   humanize.onIncoming(api, ev)  عند كل رسالة واردة (قراءة متأخرة طبيعية)
  *
- * لإيقافه: HUMANIZE=0
- * إيقاف حالة النشاط فقط: HUMAN_ONLINE=0
- * ضبط السرعة (اختياري): HUMAN_READ_MIN_MS, HUMAN_READ_MAX_MS, HUMAN_GAP_MIN_MS, HUMAN_GAP_MAX_MS
- * تجديد حالة النشاط (اختياري): HUMAN_ONLINE_REFRESH_MS (الافتراضي 4 دقائق)
+ * ماذا يفعل:
+ *  1) «تمت القراءة» بعد تأخير عشوائي، لا فورًا.
+ *  2) قبل كل رد: وقت تفكير ثم مؤشر «يكتب...» بمدة تناسب طول النص.
+ *  3) الردود في نفس المحادثة تُرسل بالتتابع مع فاصل عشوائي (لا رشق متزامن).
+ *  4) حد أدنى للفاصل بين أي رسالتين من الحساب (يخفف الضغط على الحساب).
+ *  5) إن تراكمت الردود تُسرَّع الانتظارات تلقائيًا حتى لا يتأخر الرد كثيرًا.
+ *
+ * كل القيم تُضبط بمتغيرات بيئة (اختيارية). HUMANIZE=0 يعطّل الملف كله.
  */
-const log = require('./log');
+const num = (name, def) => {
+    const raw = process.env[name];
+    if (raw === undefined || raw === '') return def;
+    const v = Number(raw);
+    return Number.isFinite(v) ? v : def;
+};
 
-const num = (name, def) => (process.env[name] !== undefined && !isNaN(Number(process.env[name])) ? Number(process.env[name]) : def);
-const ENABLED = process.env.HUMANIZE !== '0';
-const ONLINE = process.env.HUMAN_ONLINE !== '0';
-const READ_MIN = num('HUMAN_READ_MIN_MS', 800);
-const READ_MAX = num('HUMAN_READ_MAX_MS', 3500);
-const GAP_MIN = num('HUMAN_GAP_MIN_MS', 1200);
-const GAP_MAX = num('HUMAN_GAP_MAX_MS', 3000);
-const ONLINE_REFRESH = num('HUMAN_ONLINE_REFRESH_MS', 4 * 60 * 1000);
-const MAX_QUEUE = 60;           // حماية: لا نكدّس أكثر من هذا العدد من الردود المنتظرة
+const CFG = {
+    get enabled() { return process.env.HUMANIZE !== '0'; },
+    readMin: num('HUMAN_READ_MIN_MS', 700),       // تأخير «تمت القراءة»
+    readMax: num('HUMAN_READ_MAX_MS', 4000),
+    thinkMin: num('HUMAN_THINK_MIN_MS', 400),     // «تفكير» قبل بدء الكتابة
+    thinkMax: num('HUMAN_THINK_MAX_MS', 1800),
+    cpm: num('HUMAN_CPM', 320),                   // سرعة الكتابة (حرف/دقيقة)
+    typeMinMs: num('HUMAN_TYPE_MIN_MS', 600),
+    typeMaxMs: num('HUMAN_TYPE_MAX_MS', 8000),
+    mediaTypeMin: num('HUMAN_MEDIA_MIN_MS', 800), // رسائل المرفقات بلا نص
+    mediaTypeMax: num('HUMAN_MEDIA_MAX_MS', 2000),
+    gapMin: num('HUMAN_GAP_MIN_MS', 900),         // فاصل بين رسائل نفس المحادثة
+    gapMax: num('HUMAN_GAP_MAX_MS', 2600),
+    globalGap: num('HUMAN_GLOBAL_GAP_MS', 400),   // أقل فاصل بين أي رسالتين من الحساب
+    warmMs: num('HUMAN_WARM_MS', 20000),          // محادثة «نشطة»: تفكير أقصر
+    backlog: num('HUMAN_BACKLOG', 4)              // عدد الردود المتراكمة قبل التسريع
+};
 
-const sleep = ms => new Promise(r => setTimeout(r, ms));
-const rand = (a, b) => a + Math.random() * (b - a);
+const sleep = ms => new Promise(r => setTimeout(r, Math.max(0, ms)));
+const rand = (a, b) => a + Math.random() * Math.max(0, b - a);
+const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
 
-/* ─────────── علامة القراءة ─────────── */
-const readTimers = new Map(); // threadID -> timer (دمج الرسائل المتتالية في قراءة واحدة)
-const MESSAGE_TYPES = new Set(['message', 'message_reply']);
+const stats = { sent: 0, queuedNow: 0, lastSendAt: 0 };
+const queues = new Map();       // threadID -> آخر وعد في السلسلة
+const lastThreadSend = new Map(); // threadID -> وقت آخر إرسال
+const readTimers = new Map();   // threadID -> مؤقت «تمت القراءة»
+let sendGate = Promise.resolve(); // يضمن الفاصل العام بين الرسائل
 
-function onIncoming(api, event) {
-    if (!ENABLED || !event || !event.threadID) return;
-    // نتجاهل الأحداث التي ليست رسائل (كتابة، تفاعلات، تغيير اسم...)
-    if (event.type && !MESSAGE_TYPES.has(event.type)) return;
-    // نتجاهل رسائل الحساب نفسه
+function textLength(msg) {
+    if (typeof msg === 'string') return msg.length;
+    if (msg && typeof msg.body === 'string') return msg.body.length;
+    return 0;
+}
+
+function hasMedia(msg) {
+    return !!(msg && typeof msg === 'object' && (msg.attachment || msg.sticker || msg.url));
+}
+
+/** يبدأ مؤشر «يكتب...» ويرجع دالة لإيقافه، مع تحمّل اختلاف المكتبات */
+function startTyping(api, threadID) {
+    const noop = () => {};
     try {
-        const me = typeof api.getCurrentUserID === 'function' ? String(api.getCurrentUserID()) : null;
-        if (me && String(event.senderID) === me) return;
-    } catch (e) { /* تجاهل */ }
-
-    const tid = String(event.threadID);
-    const mid = event.messageID;
-
-    // "وصلت" مباشرة، ثم "تمت القراءة" بعد تأخير عشوائي
-    try {
-        if (mid && typeof api.markAsDelivered === 'function') api.markAsDelivered(tid, mid, () => {});
-    } catch (e) { /* تجاهل */ }
-
-    if (readTimers.has(tid)) return;
-    const t = setTimeout(() => {
-        readTimers.delete(tid);
-        try {
-            if (typeof api.markAsRead === 'function') api.markAsRead(tid, true, () => {});
-            else if (typeof api.markAsReadAll === 'function') api.markAsReadAll(() => {});
-        } catch (e) { /* تجاهل */ }
-    }, rand(READ_MIN, READ_MAX));
-    readTimers.set(tid, t);
-}
-
-/* اعتراض الاستماع: كل رسالة واردة تمر على onIncoming حتى لو لم تطابق أي أمر */
-function patchListen(api) {
-    ['listenMqtt', 'listen'].forEach(key => {
-        if (typeof api[key] !== 'function') return;
-        const orig = api[key].bind(api);
-        api[key] = function (...args) {
-            const i = args.findIndex(a => typeof a === 'function');
-            if (i !== -1) {
-                const cb = args[i];
-                args[i] = function (err, ev) {
-                    if (!err && ev) { try { onIncoming(api, ev); } catch (e) { /* تجاهل */ } }
-                    return cb.apply(this, arguments);
-                };
-            }
-            return orig(...args);
-        };
-    });
-}
-
-/* ─────────── حالة النشاط ─────────── */
-function keepOnline(api) {
-    if (!ONLINE || typeof api.setOptions !== 'function') return;
-    const set = () => { try { api.setOptions({ online: true }); } catch (e) { /* تجاهل */ } };
-    set();
-    const iv = setInterval(set, ONLINE_REFRESH);
-    if (iv.unref) iv.unref();
-}
-
-/* ─────────── الإرسال البشري ─────────── */
-function typingTime(msg) {
-    const text = typeof msg === 'string' ? msg : (msg && msg.body) || '';
-    const base = typeof msg === 'string' || (msg && msg.body) ? 500 + text.length * 30 : 700; // مرفقات بلا نص: مدة قصيرة
-    return Math.min(base, 5000) * rand(0.8, 1.25);
-}
-
-function wrap(api) {
-    if (!ENABLED || !api || api.__humanized) return api;
-    const original = api.sendMessage.bind(api);
-    let chain = Promise.resolve();
-    let pending = 0;
-
-    patchListen(api);
-    keepOnline(api);
-
-    api.sendMessage = function (msg, threadID, callback, replyMessageID) {
-        // تدعم الاستدعاء بصيغة (msg, threadID, replyMessageID) أيضًا
-        if (typeof callback === 'string' && replyMessageID === undefined) { replyMessageID = callback; callback = undefined; }
-        if (pending >= MAX_QUEUE) {
-            log('طابور الردود ممتلئ، تم تجاهل رد لحماية الحساب', 'warn');
-            if (typeof callback === 'function') callback(new Error('queue full'));
-            return;
+        if (typeof api.sendTypingIndicator !== 'function') return noop;
+        const r = api.sendTypingIndicator(String(threadID), () => {});
+        if (typeof r === 'function') return () => { try { r(() => {}); } catch (e) { /* تجاهل */ } };
+        if (r && typeof r.then === 'function') {
+            let end = null;
+            r.then(e => { end = e; }).catch(() => {});
+            return () => { try { if (typeof end === 'function') end(() => {}); } catch (e) { /* تجاهل */ } };
         }
-        pending++;
-        chain = chain.then(async () => {
-            let stopTyping = null;
-            try {
-                if (typeof api.sendTypingIndicator === 'function') {
-                    try { stopTyping = api.sendTypingIndicator(String(threadID), () => {}); } catch (e) { /* تجاهل */ }
-                }
-                await sleep(typingTime(msg));
-            } finally {
-                try { if (typeof stopTyping === 'function') stopTyping(); } catch (e) { /* تجاهل */ }
-            }
-            original(msg, threadID, callback, replyMessageID);
-            await sleep(rand(GAP_MIN, GAP_MAX));
-        }).catch(e => log('خطأ في الإرسال البشري: ' + (e && e.message || e), 'warn'))
-          .finally(() => { pending--; });
+    } catch (e) { /* تجاهل */ }
+    return noop;
+}
+
+/** يضمن حدًا أدنى للفاصل بين أي رسالتين خارجتين من الحساب */
+function globalSlot() {
+    const turn = sendGate.then(async () => {
+        const wait = stats.lastSendAt + CFG.globalGap + rand(0, CFG.globalGap) - Date.now();
+        if (wait > 0) await sleep(wait);
+        stats.lastSendAt = Date.now();
+    });
+    sendGate = turn.catch(() => {});
+    return turn;
+}
+
+function typingDuration(msg, speedUp) {
+    const len = textLength(msg);
+    let ms;
+    if (len > 0) ms = (len / (CFG.cpm / 60000)) * rand(0.75, 1.2);
+    else ms = hasMedia(msg) ? rand(CFG.mediaTypeMin, CFG.mediaTypeMax) : CFG.typeMinMs;
+    return clamp(ms * speedUp, CFG.typeMinMs * speedUp, CFG.typeMaxMs);
+}
+
+/**
+ * يلفّ api.sendMessage. التوقيعات المدعومة تبقى كما هي:
+ *   sendMessage(msg, threadID, callback?, replyToMessageID?, isGroup?)
+ *   sendMessage(msg, threadID, replyToMessageID)   (نمط قديم)
+ */
+function wrap(api) {
+    if (!api || api.__humanized || typeof api.sendMessage !== 'function') return api;
+    const original = api.sendMessage.bind(api);
+
+    api.sendMessage = function humanSendMessage(msg, threadID, callback, replyTo, ...rest) {
+        if (typeof callback !== 'function') {
+            if (typeof callback === 'string' && replyTo === undefined) replyTo = callback;
+            callback = undefined;
+        }
+        // تعطيل، أو إرسال لعدة محادثات دفعة واحدة: نمرّر كما هو
+        if (!CFG.enabled || Array.isArray(threadID)) return original(msg, threadID, callback, replyTo, ...rest);
+
+        const key = String(threadID);
+        return new Promise((resolve, reject) => {
+            const job = async () => {
+                const depth = stats.queuedNow;
+                const speedUp = depth >= CFG.backlog ? 0.4 : depth >= 2 ? 0.7 : 1;
+                const warm = Date.now() - (lastThreadSend.get(key) || 0) < CFG.warmMs;
+
+                await sleep(rand(CFG.thinkMin, CFG.thinkMax) * (warm ? 0.5 : 1) * speedUp);
+                const stopTyping = startTyping(api, key);
+                await sleep(typingDuration(msg, speedUp));
+                await globalSlot();
+                stopTyping();
+
+                await new Promise(done => {
+                    const finish = (err, info) => {
+                        lastThreadSend.set(key, Date.now());
+                        stats.sent++;
+                        try { if (callback) callback(err, info); } catch (e) { /* تجاهل */ }
+                        if (err && !callback) reject(err); else resolve(err ? undefined : info);
+                        done();
+                    };
+                    try { original(msg, threadID, finish, replyTo, ...rest); }
+                    catch (e) { finish(e); }
+                });
+            };
+
+            stats.queuedNow++;
+            const prev = queues.get(key) || Promise.resolve();
+            const next = prev
+                .then(job)
+                .catch(e => { if (!callback) reject(e); else try { callback(e); } catch (x) { /* تجاهل */ } })
+                .then(() => sleep(rand(CFG.gapMin, CFG.gapMax) * (stats.queuedNow > CFG.backlog ? 0.4 : 1)))
+                .finally(() => {
+                    stats.queuedNow = Math.max(0, stats.queuedNow - 1);
+                    if (queues.get(key) === next) queues.delete(key);
+                });
+            queues.set(key, next);
+        });
     };
+
     api.__humanized = true;
-    log.loader(`وضع السلوك البشري مُفعّل (نشط + قراءة كل الرسائل + "يكتب الآن" + فواصل بين الردود)`);
+    api.__humanStats = stats;
     return api;
 }
 
-module.exports = { wrap, onIncoming };
+/** رسالة واردة: «تمت القراءة» بعد مهلة عشوائية (آخر رسالة في المحادثة هي التي تُقرأ) */
+function onIncoming(api, event) {
+    if (!CFG.enabled || !api || !event || !event.threadID) return;
+    if (typeof api.markAsRead !== 'function') return;
+    const key = String(event.threadID);
+    clearTimeout(readTimers.get(key));
+    const t = setTimeout(() => {
+        readTimers.delete(key);
+        try {
+            const r = api.markAsRead(key, true, () => {});
+            if (r && typeof r.catch === 'function') r.catch(() => {});
+        } catch (e) { /* تجاهل */ }
+    }, rand(CFG.readMin, CFG.readMax));
+    if (typeof t.unref === 'function') t.unref();
+    readTimers.set(key, t);
+}
+
+module.exports = { wrap, onIncoming, config: CFG, stats };

@@ -18,7 +18,13 @@
     "gradient-string": "^2.0.2",
     "jpeg-js": "^0.4.4",
     "pngjs": "^7.0.0",
+    "sharp": "^0.35.0",
     "youtube-search-api": "latest",
-    "ytdl-core": "latest"
+    "ytdl-core": "latest",
+    "form-data": "^4.0.0"
+  },
+  "optionalDependencies": {
+    "biar-fca": "latest",
+    "nexus-fca": "latest"
   }
 }
