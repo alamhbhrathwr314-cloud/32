@@ -66,9 +66,43 @@ function flushNow() {
     } catch (e) { return false; }
 }
 
+
+/* آخر كوكيز حيّة صالحة قرأناها من الجلسة (لنستعملها عند إعادة الدخول بدل القديمة) */
+let lastLive = null;
+
+/** أسماء الكوكيز التي تغيّرت قيمتها أو أُضيفت أو حُذفت بين حالتين (بدون القيم) */
+function diff(a, b) {
+    const m = s => new Map((s || []).map(c => [c.key, c.value]));
+    const A = m(a), B = m(b), out = [];
+    for (const [k, v] of B) if (!A.has(k) || A.get(k) !== v) out.push(k);
+    for (const k of A.keys()) if (!B.has(k)) out.push(k);
+    return out;
+}
+
+/**
+ * يتفقد كوكيز الجلسة الحيّة (التي يحدّثها فيسبوك) ويقارنها بالمحفوظة؛
+ * إن اختلفت تُعتمد الجديدة وتُحفظ بدل القديمة.
+ * @returns {{status:'changed'|'same'|'invalid'|'none', names?:string[]}}
+ */
+function check() {
+    if (!provider) return { status: 'none' };
+    let fresh = null;
+    try { fresh = provider(); } catch (e) { /* تجاهل */ }
+    if (!valid(fresh)) return { status: 'invalid' };   // الجلسة فقدت c_user/xs: لا نكتب فوق المحفوظة
+    lastLive = fresh;
+    const prev = load();
+    if (prev && fingerprint(prev.state) === fingerprint(fresh)) return { status: 'same' };
+    const names = diff(prev && prev.state, fresh);
+    if (!save(fresh, 'auto', srcHashFn())) return { status: 'invalid' };
+    return { status: 'changed', names };
+}
+
+/** أحدث كوكيز حيّة صالحة (أو null) */
+function latest() { return valid(lastLive) ? lastLive : null; }
+
 function info() {
     const j = load();
     return j ? { savedAt: j.savedAt, origin: j.origin } : null;
 }
 
-module.exports = { load, save, hash, valid, setProvider, flushNow, info, FILE };
+module.exports = { load, save, hash, valid, setProvider, flushNow, check, latest, diff, info, FILE };

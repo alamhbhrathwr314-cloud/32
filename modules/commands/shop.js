@@ -3,11 +3,18 @@
  *
  * الأوامر (كل أمر مستقل، ولا توجد صيغة «.متجر <أمر>»):
  *   .متجر                       الأقسام وحركة السوق      | .متجر <قسم> أو <غرض>
- *   .شراء <غرض> [كمية]
+ *   .شراء <غرض>
  *   .بيع <غرض> [كمية|الكل]
  *   .حقيبتي
  *   .تحصيل
- *   .استثمار [خطة مبلغ | سحب]
+ *   .استثمار [خطة مبلغ | سحب | اعمال]
+ *   .اعمالي                     مصانعك وشركاتك وعمالها
+ *   .وظف <مشروع> [عدد]          توظيف عمال (رسوم توظيف مرة واحدة + راتب بالساعة)
+ *   .سرح <مشروع> [عدد|الكل]     تسريح عمال
+ *
+ * - كل غرض يُشترى مرة واحدة فقط (لا كميات). يمكن بيعه ثم شراؤه من جديد.
+ * - المشاريع والشركات (القسم 7) تعمل بالعمال: كل عامل يزيد الإنتاج (بمردود يتناقص تدريجيًا)
+ *   ويُخصم راتبه من الدخل كل ساعة، فيزيد الربح الصافي بحسب الإنتاج.
  *
  * - 50 غرضًا في 8 أقسام، أسعارها تتغيّر يوميًا (ثابتة طوال اليوم UTC).
  * - الشراء بسعر اليوم، والبيع بـ 80% منه.
@@ -22,8 +29,8 @@ const states = require('../../utils/db/states');
 const HOUR = 3600000;
 const DAY = 24 * HOUR;
 const SELL_RATE = 0.8;        // البيع بـ 80% من سعر اليوم
-const MAX_BUY = 50;           // أقصى كمية في عملية شراء
-const MAX_OWNED = 99;         // أقصى ما يملكه اللاعب من الغرض الواحد
+const MAX_BUY = 1;            // كل غرض يُشترى مرة واحدة فقط
+const MAX_OWNED = 1;          // نسخة واحدة من كل غرض
 const MAX_ACTIVE_INVEST = 5;  // أقصى عدد استثمارات نشطة
 
 /* ═══════════════════════════ الأقسام والأغراض ═══════════════════════════ */
@@ -72,6 +79,13 @@ const ITEMS = RAW.map((r, i) => ({
     id: i + 1, cat: r[0], emoji: r[1], name: r[2], price: r[3], rate: r[4] || 0,
     vol: CATEGORIES.find(c => c.id === r[0]).vol
 }));
+/* ─── المشاريع والشركات: العمال والإنتاج ─── */
+const BIZ_CAP = { 'مقهى': 5, 'متجر تجزئة': 8, 'مطعم': 10, 'مصنع': 20, 'شركة برمجة': 15, 'بنك': 25 }; // أقصى عدد عمال
+const WORKER_OUTPUT = 0.40;   // إنتاج أول عامل = 40% من الدخل الأساسي بالساعة
+const WORKER_DECAY = 0.95;    // كل عامل بعده ينتج 95% من سابقه (مردود يتناقص)
+const WAGE_RATE = 0.10;       // راتب كل عامل بالساعة = 10% من الدخل الأساسي (يُخصم من الربح)
+const HIRE_FEE_RATE = 0.02;   // رسوم توظيف العامل (مرة واحدة) = 2% من سعر المشروع
+ITEMS.forEach(it => { if (it.cat === 7) { it.biz = true; it.maxWorkers = BIZ_CAP[it.name] || 10; } });
 const itemById = id => ITEMS.find(i => i.id === Number(id)) || null;
 const categoryById = id => CATEGORIES.find(c => c.id === Number(id)) || null;
 
@@ -95,6 +109,11 @@ const priceNow = (item, day) => Math.max(1, Math.round(item.price * factorToday(
 const sellNow = (item, day) => Math.floor(priceNow(item, day) * SELL_RATE);
 const changePct = (item, day) => Math.round((factorToday(item, day) - 1) * 100);
 const incomePerHour = item => (item.rate ? Math.round(item.price * item.rate) : 0);
+const bizOutput = (item, n) => { let k = 0; for (let i = 0; i < n; i++) k += WORKER_OUTPUT * Math.pow(WORKER_DECAY, i); return Math.round(incomePerHour(item) * k); };
+const bizWages = (item, n) => Math.round(incomePerHour(item) * WAGE_RATE * n);
+const bizRate = (item, n) => Math.max(0, incomePerHour(item) + bizOutput(item, n) - bizWages(item, n)); // الصافي بالساعة
+const hireFee = item => Math.round(item.price * HIRE_FEE_RATE);
+const nextWorkerGain = (item, n) => Math.round(incomePerHour(item) * (WORKER_OUTPUT * Math.pow(WORKER_DECAY, n) - WAGE_RATE));
 
 /* ═══════════════════════════ البحث بالاسم أو الرقم ═══════════════════════════ */
 const norm = s => String(s || '').toLowerCase()
@@ -127,7 +146,8 @@ function findCategory(query) {
 function loadUser(uid) {
     const d = states.getData(String(uid));
     const s = d.shop && typeof d.shop === 'object' ? d.shop : {};
-    d.shop = Object.assign({ items: {}, lastCollect: Date.now(), pending: 0, investments: [], spent: 0 }, s);
+    d.shop = Object.assign({ items: {}, lastCollect: Date.now(), pending: 0, investments: [], spent: 0, biz: {} }, s);
+    if (!d.shop.biz || typeof d.shop.biz !== 'object') d.shop.biz = {};
     // تنظيف تلقائي: المخزون القديم يُعاد بناؤه من سجل المتجر (يزيل العناصر اليتيمة مثل #25)
     const clean = Object.keys(d.shop.items).filter(k => d.shop.items[k] > 0);
     const cur = Array.isArray(d.inventory) ? d.inventory.map(String) : [];
@@ -164,7 +184,13 @@ const snapshot = d => JSON.stringify(d);                                       /
 const restore = (uid, snap) => states.saveData(String(uid), JSON.parse(snap)); // استرداد عند فشل الحفظ
 
 const owned = (d, item) => d.shop.items[item.id] || 0;
-const ownedRate = d => Object.entries(d.shop.items).reduce((s, [id, q]) => s + q * incomePerHour(itemById(id) || { price: 0, rate: 0 }), 0);
+const workersOf = (d, item) => ((d.shop.biz && d.shop.biz[item.id] && d.shop.biz[item.id].workers) | 0);
+const ownedRate = d => Object.entries(d.shop.items).reduce((s, [id, q]) => {
+    const it = itemById(id);
+    if (!it) return s;
+    if (it.biz) return s + bizRate(it, workersOf(d, it)) + Math.max(0, q - 1) * incomePerHour(it);
+    return s + q * incomePerHour(it);
+}, 0);
 const assetsValue = (d, day) => Object.entries(d.shop.items).reduce((s, [id, q]) => { const it = itemById(id); return s + (it ? q * sellNow(it, day) : 0); }, 0);
 
 /** يضيف الدخل المتراكم إلى pending ثم يصفّر العدّاد (قبل أي تغيير في الأغراض المدرّة للدخل) */
@@ -183,8 +209,9 @@ function pendingNow(d, now = Date.now()) {
 
 /* ═══════════════════════════ الشراء والبيع والتحصيل ═══════════════════════════ */
 function buy(d, item, qty, now = Date.now()) {
-    if (!Number.isInteger(qty) || qty < 1 || qty > MAX_BUY) return { error: `الكمية من 1 إلى ${MAX_BUY}` };
-    if (owned(d, item) + qty > MAX_OWNED) return { error: `لا يمكنك امتلاك أكثر من ${MAX_OWNED} من نفس الغرض` };
+    if (!Number.isInteger(qty) || qty < 1) return { error: 'الكمية غير صحيحة' };
+    if (owned(d, item) >= MAX_OWNED) return { error: `تملك ${item.emoji} ${item.name} بالفعل، كل غرض يُشترى مرة واحدة فقط` };
+    if (qty > MAX_BUY) return { error: 'كل غرض يُشترى مرة واحدة فقط (بدون كميات)' };
     const cost = priceNow(item, dayIndex(now)) * qty;
     if (d.points < cost) return { error: `رصيدك ${d.points.toLocaleString('en-US')} لا يكفي، المطلوب ${cost.toLocaleString('en-US')}`, cost };
     accrue(d, now);
@@ -203,7 +230,7 @@ function sell(d, item, qty, now = Date.now()) {
     const gain = sellNow(item, dayIndex(now)) * qty;
     d.points += gain;
     d.shop.items[item.id] = have - qty;
-    if (d.shop.items[item.id] <= 0) delete d.shop.items[item.id];
+    if (d.shop.items[item.id] <= 0) { delete d.shop.items[item.id]; if (d.shop.biz) delete d.shop.biz[item.id]; } // بيع المشروع يُنهي عمله وعماله
     return { gain, left: have - qty, sold: qty };
 }
 function collectIncome(d, now = Date.now()) {
@@ -212,6 +239,32 @@ function collectIncome(d, now = Date.now()) {
     d.shop.pending = 0;
     d.points += amount;
     return { amount, rate: ownedRate(d) };
+}
+
+/* ═══════════════════════════ العمال (المصانع والشركات) ═══════════════════════════ */
+function hire(d, item, n, now = Date.now()) {
+    if (!item.biz) return { error: 'العمال للمصانع والشركات فقط (القسم 7)' };
+    if (!owned(d, item)) return { error: `لا تملك ${item.emoji} ${item.name}، اشتره أولًا` };
+    if (!Number.isInteger(n) || n < 1) return { error: 'عدد العمال غير صحيح' };
+    const w = workersOf(d, item);
+    if (w + n > item.maxWorkers) return { error: `أقصى عدد عمال في ${item.name} هو ${item.maxWorkers} (لديك ${w})` };
+    const cost = hireFee(item) * n;
+    if (d.points < cost) return { error: `رسوم التوظيف ${cost.toLocaleString('en-US')} ورصيدك ${d.points.toLocaleString('en-US')}` };
+    accrue(d, now);
+    d.points -= cost;
+    d.shop.biz[item.id] = { workers: w + n };
+    return { cost, workers: w + n, net: bizRate(item, w + n) };
+}
+function fire(d, item, n, now = Date.now()) {
+    if (!item.biz) return { error: 'العمال للمصانع والشركات فقط (القسم 7)' };
+    const w = workersOf(d, item);
+    if (!w) return { error: `لا يوجد عمال في ${item.name}` };
+    if (n === 'all') n = w;
+    if (!Number.isInteger(n) || n < 1) return { error: 'عدد العمال غير صحيح' };
+    if (n > w) return { error: `لديك ${w} عمال فقط` };
+    accrue(d, now);
+    if (w - n > 0) d.shop.biz[item.id] = { workers: w - n }; else delete d.shop.biz[item.id];
+    return { fired: n, workers: w - n, net: bizRate(item, w - n) };
 }
 
 /* ═══════════════════════════ الاستثمار ═══════════════════════════ */
@@ -257,7 +310,8 @@ const S = {
     itemById, categoryById, planById, findItems, findCategory,
     dayIndex, priceNow, sellNow, changePct, incomePerHour, factorToday,
     lastSave, loadUser, saveUser, snapshot, restore, owned, ownedRate, assetsValue, accrue, pendingNow,
-    buy, sell, collectIncome, invest, collectInvestments
+    buy, sell, collectIncome, invest, collectInvestments,
+    workersOf, bizRate, bizOutput, bizWages, hireFee, nextWorkerGain, hire, fire
 };
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -265,11 +319,15 @@ const S = {
  * ═══════════════════════════════════════════════════════════════════ */
 const arrow = p => (p > 0 ? `▲${p}%` : p < 0 ? `▼${Math.abs(p)}%` : '▬0%');
 
+const incText = (it, helpers) => it.biz
+    ? `🏭 دخل أساسي ${helpers.fmt(incomePerHour(it))}/ساعة + عمال (حتى ${it.maxWorkers})`
+    : `🏠 دخل ${helpers.fmt(incomePerHour(it))}/ساعة`;
+
 function itemLine(it, helpers) {
     const price = priceNow(it), inc = incomePerHour(it);
     return `[${it.id}] ${it.emoji} ${it.name}\n`
         + `      💰 ${helpers.fmt(price)} ${arrow(changePct(it))} | بيع ${helpers.fmt(sellNow(it))}`
-        + (inc ? `\n      🏠 دخل ${helpers.fmt(inc)}/ساعة` : '');
+        + (inc ? `\n      ${incText(it, helpers)}` : '');
 }
 
 /* ═══════════ التصفّح بالرد على الرسائل (أقسام ← أغراض ← شراء/بيع) ═══════════ */
@@ -299,10 +357,10 @@ function itemView(it, d, helpers, deco) {
     return deco.infoBox(`${it.emoji} ${it.name}`, [
         `💰 الشراء: ${helpers.fmt(priceNow(it))} ${arrow(changePct(it))}`,
         `💵 البيع: ${helpers.fmt(sellNow(it))}`,
-        inc ? `🏠 دخل: ${helpers.fmt(inc)}/ساعة` : null,
-        `🎒 تملك: ${owned(d, it)} | 💼 رصيدك: ${helpers.fmt(d.points)}`,
+        inc ? incText(it, helpers) : null,
+        `🎒 ${owned(d, it) ? '✅ تملكه' : 'لا تملكه'} | 💼 رصيدك: ${helpers.fmt(d.points)}`,
         '',
-        '↩️ رد: شراء [كمية] | بيع [كمية|الكل]',
+        '↩️ رد: شراء | بيع (كل غرض يُشترى مرة واحدة)',
         '⬅️ رجوع'
     ].filter(x => x !== null).join('\n'));
 }
@@ -314,15 +372,16 @@ function txBuy(uid, it, qty, helpers, p) {
     if (res.error) return { error: res.error };
     if (!saveUser(uid, d)) { restore(uid, snap); return { error: `تعذّر حفظ الشراء فلم يُخصم شيء. أرسل ${p}فحص (للمطور).${saveWhy()}` }; }
     const inc = incomePerHour(it) * qty;
-    return { d, text: `🛍️ اشتريت ${qty} × ${it.emoji} ${it.name}\n💸 ${helpers.fmt(res.cost)} | 💰 رصيدك: ${helpers.fmt(d.points)}\n🎒 تملك: ${owned(d, it)}`
-        + (inc ? `\n🏠 +${helpers.fmt(inc)}/ساعة` : '') };
+    return { d, text: `🛍️ اشتريت ${it.emoji} ${it.name}\n💸 ${helpers.fmt(res.cost)} | 💰 رصيدك: ${helpers.fmt(d.points)}`
+        + (inc ? `\n🏠 +${helpers.fmt(inc)}/ساعة` : '')
+        + (it.biz ? `\n👷 وظّف عمالًا لزيادة الإنتاج: رد على 💹 استثمار ← أعمالي، أو اكتب وظف ${it.id}` : '') };
 }
 function txSell(uid, it, qty, helpers, p) {
     const d = loadUser(uid), snap = snapshot(d);
     const res = sell(d, it, qty);
     if (res.error) return { error: res.error };
     if (!saveUser(uid, d)) { restore(uid, snap); return { error: `تعذّر حفظ البيع فلم يتغير شيء. أرسل ${p}فحص (للمطور).${saveWhy()}` }; }
-    return { d, text: `💵 بعت ${res.sold} × ${it.emoji} ${it.name}\n💰 قبضت: ${helpers.fmt(res.gain)} | رصيدك: ${helpers.fmt(d.points)}\n🎒 المتبقي: ${res.left}` };
+    return { d, text: `💵 بعت ${res.sold} × ${it.emoji} ${it.name}\n💰 قبضت: ${helpers.fmt(res.gain)} | رصيدك: ${helpers.fmt(d.points)}\n🎒 المتبقي: ${res.left}` + (it.biz ? '\n⚠️ بيع المشروع أنهى عمل عماله' : '') };
 }
 
 /* ═══════════ البيع والاستثمار بالرد ═══════════ */
@@ -340,6 +399,60 @@ function sellView(d, helpers, deco, note) {
         '⬅️ رجوع'
     ].filter(x => x !== null).join('\n'));
 }
+function bizOwned(d) { return ITEMS.filter(i => i.biz && owned(d, i) > 0); }
+function bizListView(d, helpers, deco, note) {
+    const list = bizOwned(d);
+    const rows = list.map(i => {
+        const w = workersOf(d, i);
+        return `[${i.id}] ${i.emoji} ${i.name} — 👷 ${w}/${i.maxWorkers} | ✅ ${helpers.fmt(bizRate(i, w))}/ساعة`;
+    });
+    return deco.infoBox('🏭 أعمالك', [
+        note || null,
+        note ? '' : null,
+        `💰 رصيدك: ${helpers.fmt(d.points)}`,
+        '',
+        rows.length ? rows.join('\n') : '🏢 لا تملك مصنعًا أو شركة بعد.\n🛒 اشترِ من قسم «مشاريع وشركات»: متجر 7',
+        '',
+        rows.length ? '↩️ رد برقم المشروع لإدارة عماله\n⚡ أو: وظف <رقم> [عدد] | سرح <رقم> [عدد|الكل]' : null,
+        '⬅️ رجوع'
+    ].filter(x => x !== null).join('\n'));
+}
+function bizItemView(it, d, helpers, deco, note) {
+    const w = workersOf(d, it), base = incomePerHour(it);
+    const out = bizOutput(it, w), wages = bizWages(it, w), net = bizRate(it, w);
+    const nextGain = w < it.maxWorkers ? nextWorkerGain(it, w) : null;
+    return deco.infoBox(`${it.emoji} ${it.name}`, [
+        note || null,
+        note ? '' : null,
+        `👷 العمال: ${w}/${it.maxWorkers}`,
+        `🏗️ الدخل الأساسي: ${helpers.fmt(base)}/ساعة`,
+        `📦 إنتاج العمال: +${helpers.fmt(out)}/ساعة`,
+        `💸 الرواتب: -${helpers.fmt(wages)}/ساعة (${helpers.fmt(Math.round(base * WAGE_RATE))} لكل عامل)`,
+        `✅ الصافي: ${helpers.fmt(net)}/ساعة`,
+        '',
+        nextGain === null ? '🔒 وصلت للحد الأقصى من العمال'
+            : `➕ العامل القادم: رسوم ${helpers.fmt(hireFee(it))} (مرة واحدة)، ويضيف ${nextGain >= 0 ? '+' : ''}${helpers.fmt(nextGain)}/ساعة صافي`,
+        `💼 رصيدك: ${helpers.fmt(d.points)}`,
+        '',
+        '↩️ رد: وظف [عدد] | سرح [عدد|الكل]',
+        '⬅️ رجوع'
+    ].filter(x => x !== null).join('\n'));
+}
+function txHire(uid, it, n, helpers, p) {
+    const d = loadUser(uid), snap = snapshot(d);
+    const r = hire(d, it, n);
+    if (r.error) return { error: r.error };
+    if (!saveUser(uid, d)) { restore(uid, snap); return { error: `تعذّر حفظ التوظيف فلم يُخصم شيء. أرسل ${p}فحص (للمطور).${saveWhy()}` }; }
+    return { text: `👷 وظّفت ${n} في ${it.emoji} ${it.name}\n💸 الرسوم: ${helpers.fmt(r.cost)}\n👷 العمال الآن: ${r.workers}/${it.maxWorkers} | ✅ الصافي: ${helpers.fmt(r.net)}/ساعة` };
+}
+function txFire(uid, it, n, helpers, p) {
+    const d = loadUser(uid), snap = snapshot(d);
+    const r = fire(d, it, n);
+    if (r.error) return { error: r.error };
+    if (!saveUser(uid, d)) { restore(uid, snap); return { error: `تعذّر حفظ التسريح فلم يتغير شيء. أرسل ${p}فحص (للمطور).${saveWhy()}` }; }
+    return { text: `🚪 سرّحت ${r.fired} من ${it.emoji} ${it.name}\n👷 العمال الآن: ${r.workers}/${it.maxWorkers} | ✅ الصافي: ${helpers.fmt(r.net)}/ساعة` };
+}
+
 function investView(d, helpers, deco, note) {
     const now = Date.now();
     const plans = PLANS.map(x => `[${x.id}] ${x.emoji} ${x.name} — ⏳${x.hours}س | ⚠️ ${x.risk}`);
@@ -353,9 +466,10 @@ function investView(d, helpers, deco, note) {
         `💰 رصيدك: ${helpers.fmt(d.points)}`,
         '',
         plans.join('\n'),
+        `[6] 🏭 أعمالي — ${bizOwned(d).length} مشروع (عمال وإنتاج)`,
         mine.length ? `\n📂 استثماراتك (${mine.length}/${MAX_ACTIVE_INVEST}):\n${mine.join('\n')}` : null,
         '',
-        '↩️ رد برقم الخطة' + (mine.length ? ' | سحب' : ''),
+        '↩️ رد برقم الخطة (6 = أعمالي)' + (mine.length ? ' | سحب' : ''),
         '⬅️ رجوع'
     ].filter(x => x !== null).join('\n'));
 }
@@ -429,7 +543,7 @@ async function showShop({ api, event, helpers, deco, cfg }, args) {
     if (cat) {
         const items = ITEMS.filter(i => i.cat === cat.id);
         return reply(deco.infoBox(`${cat.emoji} ${cat.name}`,
-            items.map(i => itemLine(i, helpers)).join('\n') + `\n\n🛍️ ${p}شراء <رقم الغرض> [كمية]`));
+            items.map(i => itemLine(i, helpers)).join('\n') + `\n\n🛍️ ${p}شراء <رقم الغرض>`));
     }
 
     const found = findItems(q);
@@ -447,8 +561,8 @@ async function showShop({ api, event, helpers, deco, cfg }, args) {
         `📁 القسم: ${categoryById(it.cat).emoji} ${categoryById(it.cat).name}`,
         `💰 سعر اليوم: ${helpers.fmt(priceNow(it))} ${arrow(changePct(it))}`,
         `💵 سعر البيع: ${helpers.fmt(sellNow(it))}`,
-        inc ? `🏠 دخل: ${helpers.fmt(inc)} نقطة/ساعة` : null,
-        `🎒 تملك: ${owned(d, it)}`,
+        inc ? incText(it, helpers) : null,
+        `🎒 ${owned(d, it) ? '✅ تملكه' : 'لا تملكه'}`,
         '',
         `🛍️ ${p}شراء ${it.id}`
     ].filter(x => x !== null).join('\n')));
@@ -461,7 +575,7 @@ async function doBuy({ api, event, helpers, deco, cfg }, args) {
     let qty = 1; const words = [...args];
     if (words.length > 1 && /^\d{1,3}$/.test(words[words.length - 1])) qty = parseInt(words.pop(), 10);
     const query = words.join(' ').trim();
-    if (!query) return reply(deco.warning(`الاستخدام: ${p}شراء <رقم أو اسم الغرض> [كمية]\nمثال: ${p}شراء قطة 2\nتصفّح الأغراض بـ ${p}متجر`));
+    if (!query) return reply(deco.warning(`الاستخدام: ${p}شراء <رقم أو اسم الغرض>\nمثال: ${p}شراء قطة\n(كل غرض يُشترى مرة واحدة فقط)\nتصفّح الأغراض بـ ${p}متجر`));
 
     const found = findItems(query);
     if (!found.length) return reply(deco.warning(`لا يوجد غرض باسم «${query}»\nاكتب ${p}متجر لعرض الأقسام`));
@@ -482,8 +596,9 @@ async function doBuy({ api, event, helpers, deco, cfg }, args) {
     }
     const inc = incomePerHour(it) * qty;
     return reply(deco.success(
-        `🛍️ اشتريت ${qty} × ${it.emoji} ${it.name}\n💸 دفعت: ${helpers.fmt(res.cost)}\n💰 رصيدك: ${helpers.fmt(d.points)}\n🎒 تملك الآن: ${owned(d, it)}`
-        + (inc ? `\n🏠 دخل إضافي: +${helpers.fmt(inc)}/ساعة (اكتب ${p}تحصيل)` : '')));
+        `🛍️ اشتريت ${it.emoji} ${it.name}\n💸 دفعت: ${helpers.fmt(res.cost)}\n💰 رصيدك: ${helpers.fmt(d.points)}`
+        + (inc ? `\n🏠 دخل إضافي: +${helpers.fmt(inc)}/ساعة (اكتب ${p}تحصيل)` : '')
+        + (it.biz ? `\n👷 وظّف عمالًا لزيادة الإنتاج: ${p}وظف ${it.id} [عدد]` : '')));
 }
 
 /* ─── .بيع ─── */
@@ -522,7 +637,7 @@ async function doSell({ api, event, helpers, deco, cfg }, args) {
         return reply(deco.errorBox(`تعذّر حفظ عملية البيع في ملف البيانات فلم يتغير شيء. أرسل ${p}فحص (للمطور) لمعرفة السبب.${saveWhy()}`));
     }
     return reply(deco.success(
-        `💵 بعت ${res.sold} × ${it.emoji} ${it.name}\n💰 قبضت: ${helpers.fmt(res.gain)}\n💼 رصيدك: ${helpers.fmt(d.points)}\n🎒 المتبقي: ${res.left}`));
+        `💵 بعت ${res.sold} × ${it.emoji} ${it.name}\n💰 قبضت: ${helpers.fmt(res.gain)}\n💼 رصيدك: ${helpers.fmt(d.points)}\n🎒 المتبقي: ${res.left}` + (it.biz ? '\n⚠️ بيع المشروع أنهى عمل عماله' : '')));
 }
 
 /* ─── .حقيبتي ─── */
@@ -534,7 +649,10 @@ async function showBag({ api, event, helpers, deco, cfg }) {
         const mine = ITEMS.filter(i => i.cat === c.id && owned(d, i) > 0);
         if (!mine.length) continue;
         rows.push(`${c.emoji} ${c.name}`);
-        for (const i of mine) rows.push(`   ${i.emoji} ${i.name} ×${owned(d, i)} — 💵 ${helpers.fmt(sellNow(i) * owned(d, i))}`);
+        for (const i of mine) {
+            rows.push(`   ${i.emoji} ${i.name} ×${owned(d, i)} — 💵 ${helpers.fmt(sellNow(i) * owned(d, i))}`);
+            if (i.biz) rows.push(`      👷 ${workersOf(d, i)}/${i.maxWorkers} | ✅ صافي ${helpers.fmt(bizRate(i, workersOf(d, i)))}/ساعة`);
+        }
     }
     const rate = ownedRate(d), pend = pendingNow(d);
     const active = d.shop.investments.length;
@@ -579,6 +697,12 @@ async function doInvest({ api, event, helpers, deco, cfg }, args) {
     const d = loadUser(event.senderID);
     const now = Date.now();
 
+    if (BIZ_WORDS.includes(String(args[0] || '').toLowerCase()) || String(args[0]) === '6') { // أعمالي
+        const info = await reply(bizListView(d, helpers, deco));
+        remember(info, { uid: String(event.senderID), step: 'biz' });
+        return info;
+    }
+
     if (['سحب', 'withdraw', 'استلام'].includes(args[0])) { // سحب ما استحق
         const r = collectInvestments(d, now);
         if (!r.results.length) {
@@ -608,6 +732,56 @@ async function doInvest({ api, event, helpers, deco, cfg }, args) {
     return info;
 }
 
+/* ─── .اعمالي ─── */
+async function doBiz({ api, event, helpers, deco }) {
+    const info = await helpers.reply(api, event, bizListView(loadUser(event.senderID), helpers, deco));
+    remember(info, { uid: String(event.senderID), step: 'biz' });
+    return info;
+}
+
+/** يحدد المشروع المقصود من بين ما يملكه المستخدم: [item] أو { msg } */
+function pickBiz(d, query, p, cmdWord) {
+    const found = findItems(query).filter(i => i.biz);
+    if (!found.length) return { msg: `«${query}» ليس مصنعًا أو شركة. المشاريع: ${ITEMS.filter(i => i.biz).map(i => `${i.id}=${i.name}`).join('، ')}` };
+    const mine = found.filter(i => owned(d, i) > 0);
+    if (!mine.length) return { msg: `لا تملك ${found.map(i => i.name).join(' / ')}. اشتره أولًا: ${p}شراء ${found[0].id}` };
+    if (mine.length > 1) return { msg: `أي مشروع؟ ${mine.map(i => `[${i.id}] ${i.name}`).join(' | ')}\n💡 ${p}${cmdWord} <الرقم>` };
+    return { item: mine[0] };
+}
+
+/* ─── .وظف ─── */
+async function doHire({ api, event, helpers, deco, cfg }, args) {
+    const reply = t => helpers.reply(api, event, t);
+    const p = cfg.getPrefix();
+    let n = 1; const words = [...args];
+    if (words.length > 1 && /^\d{1,3}$/.test(words[words.length - 1])) n = parseInt(words.pop(), 10);
+    const query = words.join(' ').trim();
+    if (!query) return doBiz({ api, event, helpers, deco });
+    const d = loadUser(event.senderID);
+    const pk = pickBiz(d, query, p, 'وظف');
+    if (pk.msg) return reply(deco.warning(pk.msg));
+    const r = txHire(event.senderID, pk.item, n, helpers, p);
+    if (r.error) return reply(deco.errorBox(r.error));
+    return reply(deco.success(r.text));
+}
+
+/* ─── .سرح ─── */
+async function doFire({ api, event, helpers, deco, cfg }, args) {
+    const reply = t => helpers.reply(api, event, t);
+    const p = cfg.getPrefix();
+    let n = 1; const words = [...args];
+    const last = words[words.length - 1];
+    if (words.length > 1 && (/^\d{1,3}$/.test(last) || last === 'الكل')) { words.pop(); n = last === 'الكل' ? 'all' : parseInt(last, 10); }
+    const query = words.join(' ').trim();
+    if (!query) return doBiz({ api, event, helpers, deco });
+    const d = loadUser(event.senderID);
+    const pk = pickBiz(d, query, p, 'سرح');
+    if (pk.msg) return reply(deco.warning(pk.msg));
+    const r = txFire(event.senderID, pk.item, n, helpers, p);
+    if (r.error) return reply(deco.errorBox(r.error));
+    return reply(deco.success(r.text));
+}
+
 /* ═══════════════════════════ التوجيه: أي أمر كُتب؟ ═══════════════════════════ */
 // الكلمات التي تقود لكل إجراء (الاسم الرئيسي + الاختصارات)
 const ACTIONS = {
@@ -615,17 +789,21 @@ const ACTIONS = {
     sell:    ['بيع', 'sell'],
     bag:     ['حقيبتي', 'حقيبة', 'bag', 'اغراضي'],
     collect: ['تحصيل', 'collect', 'ايجار'],
-    invest:  ['استثمار', 'invest', 'استثمر']
+    invest:  ['استثمار', 'invest', 'استثمر'],
+    biz:     ['اعمالي', 'أعمالي', 'شركاتي', 'مصانعي', 'مشاريعي'],
+    hire:    ['وظف', 'وظّف', 'توظيف', 'hire'],
+    fire:    ['سرح', 'سرّح', 'فصل', 'fire']
 };
-const HANDLERS = { buy: doBuy, sell: doSell, bag: showBag, collect: doCollect, invest: doInvest };
+const BIZ_WORDS = ['اعمال', 'أعمال', 'اعمالي', 'أعمالي', 'شركات', 'شركاتي', 'مصانع', 'مصانعي', 'biz'];
+const HANDLERS = { buy: doBuy, sell: doSell, bag: showBag, collect: doCollect, invest: doInvest, biz: doBiz, hire: doHire, fire: doFire };
 const BROWSE_WORDS = ['متجر', 'shop', 'المتجر', 'سوق'];
 const actionOf = word => Object.keys(ACTIONS).find(k => ACTIONS[k].includes(word)) || null;
 
 module.exports.config = {
     name: 'متجر',
     aliases: [...BROWSE_WORDS.slice(1), ...Object.values(ACTIONS).flat()],
-    description: `المتجر الكبير (${ITEMS.length} غرضًا): شراء وبيع وحقيبتي وتحصيل واستثمار`,
-    usage: 'متجر [قسم | غرض | شراء | بيع | حقيبتي | تحصيل | استثمار]',
+    description: `المتجر الكبير (${ITEMS.length} غرضًا، كل غرض مرة واحدة): شراء وبيع وحقيبتي وتحصيل واستثمار وعمال المصانع والشركات`,
+    usage: 'متجر [قسم | غرض | شراء | بيع | حقيبتي | تحصيل | استثمار | اعمالي | وظف | سرح]',
     category: 'economy', cooldown: 1, adminOnly: false
 };
 
@@ -652,7 +830,10 @@ module.exports.onMessage = async ctx => {
     };
     const showCats = () => send(catsView(loadUser(s.uid), helpers, deco), { step: 'cats' });
 
-    if (BACK.includes(w0)) return showCats();
+    if (BACK.includes(w0)) {
+        if (s.step === 'biz' || s.step === 'bizitem') return send(investView(loadUser(s.uid), helpers, deco), { step: 'inv' });
+        return showCats();
+    }
     if (ACTIONS.bag.includes(w0)) { await showBag(ctx); return true; }
 
     const isBuy = ACTIONS.buy.includes(w0), isSell = ACTIONS.sell.includes(w0);
@@ -691,6 +872,38 @@ module.exports.onMessage = async ctx => {
         return view(r.error ? `⚠️ ${r.error}` : r.text);
     }
 
+    /* ─── الأعمال: قائمة المشاريع وإدارة العمال ─── */
+    const isHire = ACTIONS.hire.includes(w0), isFire = ACTIONS.fire.includes(w0);
+    if (s.step === 'biz' || s.step === 'bizitem') {
+        const d0 = loadUser(s.uid);
+        const showList = note => send(bizListView(loadUser(s.uid), helpers, deco, note), { step: 'biz' });
+        const showItem = (it, note) => send(bizItemView(it, loadUser(s.uid), helpers, deco, note), { step: 'bizitem', item: it.id });
+        const parseN = (arr, allowAll) => {
+            const last = arr[arr.length - 1];
+            if (allowAll && last === 'الكل') return { n: 'all', arr: arr.slice(0, -1) };
+            if (arr.length && /^\d{1,3}$/.test(last)) return { n: parseInt(last, 10), arr: arr.slice(0, -1) };
+            return { n: 1, arr };
+        };
+        if (isHire || isFire) {
+            const { n, arr } = parseN(words.slice(1), isFire);
+            let it = null;
+            if (arr.length) {                                    // وظف <مشروع> [عدد]
+                const pk = pickBiz(d0, arr.join(' '), p, isHire ? 'وظف' : 'سرح');
+                if (pk.msg) return s.step === 'biz' ? showList(`⚠️ ${pk.msg}`) : showItem(itemById(s.item), `⚠️ ${pk.msg}`);
+                it = pk.item;
+            } else if (s.step === 'bizitem') it = itemById(s.item);   // وظف [عدد] داخل بطاقة المشروع
+            if (!it) return showList('⚠️ حدد المشروع: وظف <رقم> [عدد]');
+            const r = isHire ? txHire(s.uid, it, n, helpers, p) : txFire(s.uid, it, n, helpers, p);
+            return showItem(it, r.error ? `⚠️ ${r.error}` : r.text);
+        }
+        if (s.step === 'biz' && /^\d{1,2}$/.test(input)) {      // رقم مشروع ← بطاقته
+            const it = itemById(input);
+            if (it && it.biz && owned(d0, it) > 0) return showItem(it);
+            return showList('⚠️ لا تملك هذا المشروع');
+        }
+        return false;
+    }
+
     /* ─── الاستثمار: اختيار الخطة / السحب ─── */
     if (s.step === 'inv') {
         const view = note => send(investView(loadUser(s.uid), helpers, deco, note), { step: 'inv' });
@@ -698,6 +911,7 @@ module.exports.onMessage = async ctx => {
             const r = txWithdraw(s.uid, helpers, p);
             return view(r.error ? `⚠️ ${r.error}` : r.text);
         }
+        if (input === '6' || BIZ_WORDS.includes(w0)) return send(bizListView(loadUser(s.uid), helpers, deco), { step: 'biz' });
         const plan = /^\d{1,2}$/.test(input) ? planById(input) : null;
         if (!plan) return false;
         return send(planView(plan, loadUser(s.uid), helpers, deco), { step: 'plan', plan: plan.id });
@@ -742,7 +956,7 @@ module.exports.onMessage = async ctx => {
         if (!it) return showCats();
         if (isSell) return trade(it, parseQty(rest, true).qty, true, 'item');
         if (isBuy) return trade(it, parseQty(rest, false).qty, false, 'item');
-        if (/^\d{1,3}$/.test(input)) return trade(it, parseInt(input, 10), false, 'item'); // رقم وحده = كمية الشراء
+        if (input === '1') return trade(it, 1, false, 'item'); // «1» وحده = شراء
         return false;
     }
     return false;

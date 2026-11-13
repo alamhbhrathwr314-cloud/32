@@ -1,17 +1,15 @@
 /**
- * .تعديل <وصف>  — تعديل الصور بالذكاء الاصطناعي عبر PixelAPI
+ * .تعديل <وصف>  — تعديل الصور بالذكاء الاصطناعي عبر Meta AI فقط
  *
  * الاستعمال: ردّ على صورة (أو أرسلها مع الأمر) واكتب ما تريد تغييره:
  *   .تعديل خلّي القميص كحلي
  *   .تعديل make the sky sunset orange
  *
+ * يرسل البوت الصورة والوصف إلى محادثة Meta AI في ماسنجر ويعيد الصورة المعدّلة (راجع utils/metaAI.js).
  * الإعداد (متغيرات البيئة في الاستضافة):
- *   PIXELAPI_KEY          مفتاح PixelAPI (إجباري)
- *   PIXELAPI_BASE         اختياري، الافتراضي https://api.pixelapi.dev
+ *   META_AI_THREAD_ID     أيدي محادثة Meta AI (راجع utils/metaAI.js)
  *   EDIT_DAILY_PER_USER   تعديلات يومية لكل عضو عادي (افتراضي 10، المطور بلا حد)
  *   EDIT_DAILY_TOTAL      سقف يومي للبوت كله (افتراضي 150)
- *
- * لا يحتاج sharp ولا Groq. يعتمد على axios الموجودة أصلًا.
  */
 const fs = require('fs');
 const os = require('os');
@@ -24,19 +22,14 @@ module.exports.config = {
     usage: 'تعديل <وصف>  (ردًّا على صورة)', category: 'media', cooldown: 20, adminOnly: false
 };
 
-const BASE = (process.env.PIXELAPI_BASE || 'https://api.pixelapi.dev').replace(/\/+$/, '');
-const apiKey = () => process.env.PIXELAPI_KEY || 'pk_live_455a5aceea0fc0358953eba034f98034ab08181b70c64f11';
 const PER_USER = Number(process.env.EDIT_DAILY_PER_USER) || 10;
 const TOTAL = Number(process.env.EDIT_DAILY_TOTAL) || 150;
 const MAX_PROMPT = 400;
-const POLL_EVERY = 3000;
-const POLL_MAX = 120000;
 
 let busy = false;
 const usage = new Map();            // userId ← { day, n }
 const total = { day: '', n: 0 };
 const today = () => new Date().toISOString().slice(0, 10);
-const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 function takeQuota(uid, isAdmin) {
     if (total.day !== today()) { total.day = today(); total.n = 0; }
@@ -64,63 +57,9 @@ function findPhoto(event) {
     return null;
 }
 
-/* ─────────── PixelAPI ─────────── */
-const headers = () => ({ Authorization: `Bearer ${apiKey()}`, 'Content-Type': 'application/json' });
-const isHttp = v => typeof v === 'string' && /^https?:\/\//i.test(v);
-
-/** يلتقط رابط الصورة الناتجة من أشكال الردود المحتملة (ويتجاهل رابط الصورة الأصلية) */
-function pickOutput(d, source) {
-    if (!d || typeof d !== 'object') return null;
-    const out = d.output;
-    const list = [
-        d.output_url, d.outputUrl, d.result_url, d.resultUrl, d.edited_url,
-        d.result && (d.result.output_url || d.result.url || d.result.image_url),
-        typeof out === 'string' ? out : (Array.isArray(out) ? out[0] : out && (out.url || out.output_url)),
-        d.url, d.image_url
-    ];
-    const hit = list.find(v => isHttp(v) && v !== source);
-    if (hit) return hit;
-    return d.data && d.data !== d ? pickOutput(d.data, source) : null;
-}
-const jobId = d => d && (d.id || d.job_id || d.task_id || d.image_id || (d.data && (d.data.id || d.data.job_id)));
-const statusOf = d => String((d && (d.status || (d.data && d.data.status))) || '').toLowerCase();
-
-async function requestEdit(imageUrl, instruction) {
-    const res = await axios.post(`${BASE}/v1/image/edit`,
-        { image_url: imageUrl, instruction },
-        { headers: headers(), timeout: 120000, validateStatus: () => true });
-    if (res.status >= 400) throw Object.assign(new Error(JSON.stringify(res.data).slice(0, 300)), { status: res.status });
-
-    let data = res.data;
-    let url = pickOutput(data, imageUrl);
-    if (url) return url;
-
-    // الطلب غير متزامن: نستعلم عن النتيجة حتى تجهز
-    const id = jobId(data);
-    if (!id) throw new Error('ردّ غير متوقع من الخدمة: ' + JSON.stringify(data).slice(0, 200));
-    const t0 = Date.now();
-    while (Date.now() - t0 < POLL_MAX) {
-        await sleep(POLL_EVERY);
-        const r = await axios.get(`${BASE}/v1/image/${encodeURIComponent(id)}`,
-            { headers: headers(), timeout: 30000, validateStatus: () => true });
-        if (r.status >= 400) throw Object.assign(new Error(JSON.stringify(r.data).slice(0, 300)), { status: r.status });
-        data = r.data;
-        url = pickOutput(data, imageUrl);
-        if (url) return url;
-        if (/fail|error|cancel|reject/.test(statusOf(data))) {
-            throw new Error('فشل التعديل: ' + JSON.stringify(data).slice(0, 200));
-        }
-    }
-    throw Object.assign(new Error('انتهت مهلة انتظار النتيجة'), { code: 'ETIMEDOUT' });
-}
-
 function failMsg(e) {
-    const s = e && e.status;
-    if (s === 401 || s === 403) return 'مفتاح PixelAPI غير صالح، يحتاج المطور إلى تحديثه';
-    if (s === 402) return 'انتهى رصيد خدمة التعديل، يحتاج المطور إلى شحنه';
-    if (s === 422 || s === 400) return 'تعذّر تنفيذ هذا الطلب على الصورة، جرّب وصفًا آخر أو صورة أخرى';
-    if (s === 429) return 'الخدمة مزدحمة الآن، حاول بعد دقيقة';
-    if (e && (e.code === 'ETIMEDOUT' || e.code === 'ECONNABORTED')) return 'تأخّرت الخدمة في الرد، حاول مجددًا';
+    if (e && e.code === 'META_TIMEOUT') return 'تعذّر تعديل الصورة، جرّب وصفًا آخر أو صورة أخرى';
+    if (e && (e.code === 'META_SEND' || e.code === 'META_BUSY')) return 'الخدمة غير متاحة الآن، حاول بعد قليل';
     return 'حدث خطأ أثناء تعديل الصورة، حاول مرة أخرى';
 }
 
@@ -130,12 +69,6 @@ module.exports.run = async ({ api, event, args, helpers, deco, cfg }) => {
     const p = cfg.getPrefix();
     const uid = String(event.senderID);
     const isAdmin = cfg.isAdmin(uid);
-
-    if (!apiKey()) {
-        return reply(isAdmin
-            ? deco.warning('أضف متغير PIXELAPI_KEY في الاستضافة ثم أعد التشغيل')
-            : deco.warning('هذا الأمر غير مفعّل بعد'));
-    }
 
     const prompt = args.join(' ').trim();
     const url = findPhoto(event);
@@ -157,9 +90,9 @@ module.exports.run = async ({ api, event, args, helpers, deco, cfg }) => {
     busy = true;
     let ok = false, wait = null, file = null;
     try {
-        wait = await reply(deco.infoBox('⏳ جاري التعديل', 'أرسلت طلبك للذكاء الاصطناعي، انتظر قليلًا...'));
+        wait = await reply(deco.title('⏳ جاري التعديل'));
 
-        const outUrl = await requestEdit(url, prompt);
+        const outUrl = await require('../../utils/metaAI').edit(api, url, prompt);
 
         const img = await axios.get(outUrl, { responseType: 'arraybuffer', timeout: 60000, maxContentLength: 25 * 1024 * 1024 });
         const type = String(img.headers['content-type'] || '');
@@ -179,8 +112,7 @@ module.exports.run = async ({ api, event, args, helpers, deco, cfg }) => {
         if (wait && wait.messageID && typeof api.unsendMessage === 'function') api.unsendMessage(String(wait.messageID), () => {});
     } catch (e) {
         console.error('[تعديل]', 'status=' + (e && e.status), 'code=' + (e && e.code), String(e && e.message || '').slice(0, 300));
-        const detail = isAdmin && e && e.message ? '\n\n🔧 (للمطور) ' + String(e.message).replace(/\s+/g, ' ').slice(0, 200) : '';
-        await reply(deco.errorBox(failMsg(e) + detail));
+        await reply(deco.errorBox(failMsg(e)));
     } finally {
         busy = false;
         if (!ok) refundQuota(uid, isAdmin);

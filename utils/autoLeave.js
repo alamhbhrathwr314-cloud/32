@@ -58,6 +58,7 @@ async function leave(api, botID, threadID) {
 
 async function runOnce(api, cfg, log) {
     if (running) return 0;
+    try { if (require('./humanize').isAsleep()) return 0; } catch (e) { /* تجاهل */ }   // وقت النوم: لا طلبات لفيسبوك
     running = true;
     let left = 0;
     try {

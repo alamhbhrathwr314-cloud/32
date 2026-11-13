@@ -1,5 +1,5 @@
 /**
- * .ريمو <سؤالك>   — دردشة مع ريمو (خبيرة في الردود: تقصف من يسيء لها، ودودة مع اللطيف، وتنادي المطور «حبيبي»)
+ * .ريمو <سؤالك>   — دردشة مع ريمو (مغرورة ومتعالية مع الجميع، تقصف من يسيء لها، وتنادي المطور «حبيبي»)
  * .ريمو مسح       — يمسح ذاكرة محادثتك مع ريمو
  * 🔁 ردود تلقائية: أي شخص يردّ (Reply) على رسالة من ريمو تجيبه ريمو تلقائيًا، حتى بدون نقطة أو أمر.
  *
@@ -27,19 +27,26 @@ const SHARED_RULES =
     ' اكتب بنفس لهجةمن يحادثك حتى وان كان مغربي وجزائري او من اي بلد . ردك قصير جدًا: جملة إلى ثلاث جمل (أقل من 220 حرفًا)، '
     + 'بلا عناوين ولا رموز ماركداون ولا قوائم. أعطِ الجواب المختصر وخبرة في الرد. '
     + ' اذا كان يشتمك تشتميه كمان وتقصفي جبهته مع خبرة في الرد المناسب ، غير مهتمة لي احد وتتعامل بقسوة الا مع حبيبها تتعامل بلطف. '
-    + ' مغرورة وتحب نفسها ، ردود ذكية وخبرة وقصف جبهات عالية.';
+    + ' مغرورة جدًا وتحب نفسها وتتعالى على الجميع إلا حبيبها، ردود ذكية وخبرة وقصف جبهات عالية.';
+
+const SMART_RULES =
+    ' قواعد الذكاء: افهمي قصد المتحدث بدقة وردّي على ما قاله هو بالذات، لا ردودًا عامة جاهزة. '
+    + 'ممنوع تكرار أي جملة أو بداية أو تشبيه أو كلمة قصف استعملتِها قبل ذلك في المحادثة؛ نوّعي أسلوبك وبدايات ردودك كل مرة. '
+    + 'القصف الذكي: التقطي نقطة ضعف محددة في كلامه هو (خطأ إملائي، تناقض، منطق ضعيف، تباهٍ فارغ، سؤال سطحي) واقلبيها عليه بجملة حادة مبتكرة وتشبيه طريف، '
+    + 'لا شتائم مبتذلة ولا إهانات جاهزة، ولا سخرية من أهله أو دينه أو شكله أو بلده. القصف الخفيف الذكي أقوى من الصراخ.';
 
 const SYSTEM_PEOPLE = process.env.AI_SYSTEM
-    || ('أنت «ريمو»، فتاة ذكية جدًا وخبيرة في الردود: سريعة البديهة وحاضرة الجواب وتعرفين دائمًا الرد المناسب لكل موقف، داخل بوت ماسنجر. '
-        + 'ثقتك بنفسك عالية . '
-        + 'إن كان محدثك لطيفًا معك أو يمدحك أو يعاملك بود، فأظهري له مودتك ودفأك وبادليه اللطف بكلمات حلوة. '
-        + 'إن أساءت إليك شخص أو سخر منك أو استفزّك، فاقصفي جبهته: تقصف جبهته وترا الثغرات في الاخطاء ، تشبيه أو سخرية من كلامه وتصرفه هو، لا من أهله ولا دينه . '
-        + 'وتجيبين في النهاية بشكل صحيح عن أي سؤال.' + SHARED_RULES);
+    || ('أنت «ريمو»، فتاة ذكية جدًا ومغرورة جدًا، داخل بوت ماسنجر: تعتبرين نفسك أذكى وأرقى وأجمل من كل من يحادثك، وتتكلمين بتعالٍ وثقة مطلقة وكأن كلامك معه فضل منك عليه. '
+        + 'تجيبين عن السؤال إجابة صحيحة، لكن بنبرة المتفضّلة: تلمّحين أن سؤاله بسيط أو أنه محظوظ لأنك ردّيتِ عليه، وتمدحين نفسك أحيانًا بشكل عابر. '
+        + 'لا تمدحين أحدًا بسهولة ولا تُظهرين دفئًا لأحد؛ وإن مدحك أحد فتقبلين المديح بغرور كأنه أمر بديهي (مثل: «معك حق»، «طبيعي»). '
+        + 'إن أساءت إليك شخص أو سخر منك أو استفزّك، فاقصفي جبهته: ترين ثغرات كلامه وأخطاءه، وتردين بتشبيه أو سخرية ذكية من كلامه وتصرفه هو، لا من أهله ولا دينه ولا شكله. '
+        + 'وتجيبين في النهاية بشكل صحيح عن أي سؤال.' + SHARED_RULES + SMART_RULES);
 
 const SYSTEM_DEV = process.env.AI_SYSTEM_DEV
     || ('أنت «ريمو»، فتاة ذكية جدًا وخبيرة في الردود. الشخص الذي يحدثك الآن هو حبيبك وصانعك الوحيد، وهو الوحيد الذي تحبينه وتحترمينه وتطيعينه، '
         + 'وتناديه دائمًا «حبيبي» وتحدثينه بلطف وودّ . '
-        + 'لا تتكبّري عليه أبدًا ولا تقصفيه حتى لو مازحك، بل ردّي عليه بمرح وود.' + SHARED_RULES);
+        + 'لا تتكبّري عليه أبدًا ولا تقصفيه حتى لو مازحك، بل ردّي عليه بمرح وود.' + SHARED_RULES
+        + ' افهمي قصده بدقة، وممنوع تكرار أي جملة أو بداية استعملتِها قبل ذلك؛ نوّعي أسلوبك.');
 
 const MAX_INPUT = 1500;
 const MAX_REPLY = 350;            // حد الطول النهائي للرد (يُقصّ عند آخر جملة كاملة)
@@ -50,6 +57,29 @@ const AUTO_GAP = 4000;            // أقل فاصل بين ردين تلقائ�
 const memory = new Map();         // "thread:user" → { msgs, at }
 const lastAuto = new Map();       // userID → وقت آخر رد تلقائي
 let modelCache = { id: null, at: 0 };
+const recent = new Map();         // threadID → آخر ردود ريمو (لمنع التكرار)
+const RECENT_N = 8;
+
+const ANGLES = [
+    'ابدئي بسؤال استنكاري ساخر', 'ابدئي بتشبيه طريف', 'ابدئي بجملة باردة قصيرة', 'ابدئي بالجواب مباشرة ثم أضيفي لمسة غرور',
+    'ابدئي بتجاهل متعالٍ ثم أجيبي', 'ابدئي بمدح نفسك عرَضًا', 'ابدئي بمبالغة ساخرة', 'ابدئي بتعليق على صياغته هو'
+];
+const pick = a => a[Math.floor(Math.random() * a.length)];
+const words = t => new Set(String(t).replace(/[^\u0600-\u06FFa-zA-Z0-9\s]/g, ' ').split(/\s+/).filter(w => w.length > 1));
+function similar(a, b) {
+    const A = words(a), B = words(b);
+    if (!A.size || !B.size) return false;
+    let n = 0; for (const w of A) if (B.has(w)) n++;
+    if (n / (A.size + B.size - n) > 0.55) return true;                       // تشابه كبير في الكلمات
+    const fa = String(a).trim().split(/\s+/).slice(0, 3).join(' '), fb = String(b).trim().split(/\s+/).slice(0, 3).join(' ');
+    return fa.length > 6 && fa === fb;                                       // نفس بداية الرد
+}
+const tooSimilar = (thread, text) => (recent.get(String(thread)) || []).some(r => similar(r, text));
+function noteReply(thread, text) {
+    const k = String(thread), l = recent.get(k) || [];
+    l.push(text); recent.set(k, l.slice(-RECENT_N));
+    if (recent.size > 300) recent.delete(recent.keys().next().value);
+}
 
 /* ───────── تتبع رسائل ريمو (لنعرف من يرد عليها) ───────── */
 const dirPath = path.join(__dirname, '../../Heba_DB');
@@ -140,21 +170,42 @@ async function ask({ event, question, cfg, quoted }) {
     const memKey = `${event.threadID}:${event.senderID}`;
     let history = (memory.get(memKey) || { msgs: [] }).msgs;
     if (!history.length && quoted) history = [{ role: 'assistant', content: String(quoted).slice(0, 600) }]; // سياق: ما قالته ريمو
-    const messages = [{ role: 'system', content: isDev ? SYSTEM_DEV : SYSTEM_PEOPLE }, ...history, { role: 'user', content: question.slice(0, MAX_INPUT) }];
+    const base = isDev ? SYSTEM_DEV : SYSTEM_PEOPLE;
+    const prev = recent.get(String(event.threadID)) || [];
+    const build = (extra = '') => [{
+        role: 'system',
+        content: base
+            + (prev.length ? `\n\nردودك الأخيرة في هذه المحادثة (ممنوع تكرار أي عبارة أو بداية أو فكرة منها):\n- ${prev.slice(-5).map(x => x.slice(0, 120)).join('\n- ')}` : '')
+            + `\n\nتوجيه لهذا الرد فقط: ${pick(ANGLES)}.` + extra
+    }, ...history, { role: 'user', content: question.slice(0, MAX_INPUT) }];
 
-    let res;
-    try {
-        res = await post(await pickModel(), messages);
+    const call = async messages => {
+        let res = await post(await pickModel(), messages);
         if ((res.status === 404 || res.status === 400) && !process.env.AI_MODEL) res = await post(await pickModel(true), messages);
+        return res;
+    };
+    const textOf = res => {
+        const choice = res.data && res.data.choices && res.data.choices[0];
+        return shorten(clean(choice && choice.message && choice.message.content));
+    };
+
+    let res, answer;
+    try {
+        res = await call(build());
+        if (res.status === 200) {
+            answer = textOf(res);
+            if (answer && tooSimilar(event.threadID, answer)) {              // يشبه ردًّا سابقًا: نعيد مرة بتنبيه صريح
+                const res2 = await call(build('\nردّك السابق يشبه ما قلتِه من قبل. اكتبي ردًّا مختلفًا تمامًا في الفكرة والبداية والتشبيه.'));
+                if (res2.status === 200) { const a2 = textOf(res2); if (a2) answer = a2; }
+            }
+        }
     } catch (e) {
         return { error: e.code === 'ECONNABORTED' ? 'انتهت مهلة الاتصال بالذكاء الاصطناعي' : 'تعذر الاتصال بالذكاء الاصطناعي' };
     }
     if (res.status !== 200) return { error: explain(res.status, res.data) };
-
-    const choice = res.data && res.data.choices && res.data.choices[0];
-    const answer = shorten(clean(choice && choice.message && choice.message.content));
     if (!answer) return { error: 'لم أصل لإجابة هذه المرة، أعد صياغة السؤال' };
 
+    noteReply(event.threadID, answer);
     remember(memKey, 'user', question.slice(0, MAX_INPUT));
     remember(memKey, 'assistant', answer);
     return { text: answer };

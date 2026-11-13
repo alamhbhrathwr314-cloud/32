@@ -2,6 +2,9 @@
  * ◈ ───『 المشغّل الرئيسي لبوت كيرا 』─── ◈
  * يسجّل الدخول بالكوكيز (appstate.json) ويحمّل الأوامر من modules/commands
  */
+// 🇸🇩 توقيت السودان (UTC+2) لكل العملية: السجلات والأوقات المعروضة. غيّره بمتغير TZ إن أردت
+process.env.TZ = process.env.TZ || 'Africa/Khartoum';
+
 const fs = require('fs-extra');
 const path = require('path');
 const log = require('./utils/log');
@@ -197,15 +200,32 @@ function traceEvent(event) {
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const errMsg = e => (typeof e === 'string' ? e : (e && (e.error || e.message)) || JSON.stringify(e));
 
+/**
+ * 🌍 شبكة البوت: اجعل اتصاله يبدو سودانيًا.
+ *   BOT_PROXY       بروكسي خروجه من السودان، مثل http://user:pass@host:port (بدونه يخرج البوت من عنوان الاستضافة)
+ *   BOT_USER_AGENT  اختياري: متصفح هاتف أندرويد (الافتراضي أدناه عند وجود BOT_PROXY أو BOT_MOBILE_UA=1)
+ */
+const MOBILE_UA = 'Mozilla/5.0 (Linux; Android 12; SM-A125F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36';
+function netOptions() {
+    const o = {};
+    if (process.env.BOT_PROXY) o.proxy = process.env.BOT_PROXY.trim();
+    if (process.env.BOT_USER_AGENT) o.userAgent = process.env.BOT_USER_AGENT.trim();
+    else if (process.env.BOT_PROXY || process.env.BOT_MOBILE_UA === '1') o.userAgent = MOBILE_UA;
+    return o;
+}
+
 function loginOnce(login, appState) {
     return new Promise((resolve, reject) => {
         const timer = setTimeout(() => reject(new Error('انتهت مهلة تسجيل الدخول')), LOGIN_TIMEOUT);
         try {
-            login({ appState }, (err, api) => {
+            const done = (err, api) => {
                 clearTimeout(timer);
                 if (err) return reject(new Error(errMsg(err)));
                 resolve(api);
-            });
+            };
+            const opts = netOptions();
+            if (Object.keys(opts).length) login({ appState }, opts, done);   // بروكسي/User-Agent إن وُجدا
+            else login({ appState }, done);
         } catch (e) { clearTimeout(timer); reject(e); }
     });
 }
@@ -231,6 +251,9 @@ function listenUntilDrop(api) {
             if (finished) return;
             if (e) return finish(e);
             traceEvent(event);
+            if (!['presence', 'typ', 'read_receipt'].includes(event.type)) {
+                try { if (require('./utils/metaAI').onIncoming(event)) return; } catch (e) { /* ردّ Meta AI يُلتقط هنا ولا يُعالج كأمر */ }
+            }
             if (event.type === 'message' || event.type === 'message_reply') {
                 if (String(event.senderID) !== String(botID)) { try { require('./utils/humanize').onIncoming(api, event); } catch (e) { /* تجاهل */ } }
                 handleMessage(api, event);
@@ -245,9 +268,44 @@ function listenUntilDrop(api) {
     });
 }
 
+/**
+ * 🍪 مراقب الكوكيز: كل COOKIE_WATCH_MIN دقائق (الافتراضي 5)
+ *  1) يقارن كوكيز جلسة فيسبوك الحيّة بالمحفوظة، وعند أي تغيير يعتمد الجديدة بدل المحفوظة ويرفعها إلى GitHub
+ *  2) إن عدّلتَ ملف appstate.json بيدك أثناء التشغيل يدخل بالكوكيز الجديدة تلقائيًا
+ */
+function watchCookies(ctx) {
+    try {
+        const r = session.check();
+        if (r.status === 'changed') {
+            log(`تغيّرت كوكيز فيسبوك (${(r.names || []).join(', ') || '—'}) — اعتمدت الجديدة بدل المحفوظة`, 'COOKIE');
+            try { Promise.resolve(require('./utils/cloudSync').pushChanges()).catch(() => {}); } catch (e) { /* تجاهل */ }
+        } else if (r.status === 'invalid') {
+            log('كوكيز الجلسة الحيّة ناقصة (c_user/xs)، أبقيت المحفوظة كما هي', 'warn');
+        }
+    } catch (e) { /* تجاهل */ }
+
+    try {
+        if (ctx.fromEnv || !fs.existsSync(ctx.appPath)) return;
+        const h = session.hash(fs.readFileSync(ctx.appPath, 'utf8').trim());
+        if (h === ctx.srcHash || h === ctx.badHash) return;
+        let state;
+        try { state = parseCookies(fs.readFileSync(ctx.appPath, 'utf8')); }
+        catch (e) { ctx.badHash = h; log('ملف appstate.json تغيّر لكن كوكيزه غير صالحة: ' + e.message, 'warn'); return; }
+        ctx.srcHash = h;
+        log('اكتشفت كوكيز جديدة في appstate.json أثناء التشغيل، سأدخل بها بدل المحفوظة', 'COOKIE');
+        if (typeof global.client.applyCookies === 'function') global.client.applyCookies(state, 'file');
+    } catch (e) { /* تجاهل */ }
+}
+
 function setupSession(api, ctx) {
     api.setOptions({ listenEvents: true, selfListen: false, logLevel: 'silent', updatePresence: false, forceLogin: true });
+    try { const o = netOptions(); if (Object.keys(o).length) api.setOptions(o); } catch (e) { log('تعذر ضبط خيارات الشبكة: ' + e.message, 'warn'); }
     try { require('./utils/humanize').wrap(api); } catch (e) { log('تعذر تفعيل السلوك البشري: ' + e.message, 'warn'); }
+    try {
+        require('./utils/humanize').startLife(api, {
+            log: (m, t) => log(m, t || 'LIFE')
+        });
+    } catch (e) { log('تعذر بدء دورة الحياة: ' + e.message, 'warn'); }
     global.client.api = api;
     botID = api.getCurrentUserID();
     log.loader(`تم تسجيل الدخول: ${botID} — بانتظار الرسائل...`);
@@ -268,7 +326,7 @@ function setupSession(api, ctx) {
     if (!pendingState && Array.isArray(fresh) && fresh.length) session.save(fresh, 'login', ctx.srcHash); // لا نكتب فوق كوكيز رُفعت للتو
     autoLeave.start(api, cfg, (m, t) => log(m, t || 'LEAVE'));
     clearInterval(ctx.refreshTimer);
-    ctx.refreshTimer = setInterval(() => session.flushNow(), Math.max(1, num('COOKIE_SAVE_MIN', 15)) * 60 * 1000);
+    ctx.refreshTimer = setInterval(() => watchCookies(ctx), Math.max(1, num('COOKIE_WATCH_MIN', num('COOKIE_SAVE_MIN', 5))) * 60 * 1000);
     ctx.refreshTimer.unref();
     return Array.isArray(fresh) && fresh.length ? fresh : null;
 }
@@ -302,6 +360,14 @@ async function runWithAutoReconnect(appState, ctx) {
             global.client.connectedAt = Date.now();                          // لأمر «حالة»
             global.client.logins = (global.client.logins || 0) + 1;
             const drop = pendingState ? 'تجديد الكوكيز يدويًا' : await listenUntilDrop(api);
+            if (!pendingState) {   // قبل إعادة الدخول: اعتمد أحدث كوكيز عدّلها فيسبوك بدل القديمة
+                try {
+                    const r = session.check();
+                    const live = session.latest();
+                    if (live) appState = live;
+                    if (r.status === 'changed') log('اعتمدت أحدث كوكيز من فيسبوك قبل إعادة الدخول', 'COOKIE');
+                } catch (e) { /* تجاهل */ }
+            }
             problem = errMsg(drop);
             counted = FATAL.test(problem);          // انقطاع عابر لا يُحسب، أما خطأ الجلسة فيُحسب
         } catch (e) {
@@ -309,6 +375,7 @@ async function runWithAutoReconnect(appState, ctx) {
             counted = true;                          // فشل تسجيل الدخول يُحسب
         }
 
+        try { require('./utils/humanize').stopLife(); } catch (e) { /* تجاهل */ }
         if (Date.now() - startedAt > STABLE_MS) { failures = 0; delay = MIN_DELAY; } // كان الاتصال مستقرًا
         if (counted) failures++;
         log(`انقطع الاتصال: ${problem}`, 'warn');
